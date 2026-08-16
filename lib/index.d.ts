@@ -1,6 +1,8 @@
 /** Native OpenAI Codex OAuth login for DeepSeek Harness. */
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
+import { type IncomingMessage } from 'node:http';
+import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
 /** Persisted OAuth credential. */
 export interface OpenAICodexCredential {
     access: string;
@@ -26,14 +28,55 @@ interface UsageSummary {
     resetCredits?: number;
     fetchedAt: number;
 }
+interface WebRuntimeValues {
+    lanAddresses: string[];
+    trustedHosts: string[];
+}
+interface DeviceAuthorization {
+    deviceAuthId: string;
+    userCode: string;
+    intervalSeconds: number;
+    expiresAt: number;
+}
+interface DeviceTokenCode {
+    authorizationCode: string;
+    codeVerifier: string;
+}
+interface ParsedDevicePoll {
+    status: 'pending' | 'slow_down' | 'complete' | 'failed';
+    value?: DeviceTokenCode;
+    message?: string;
+}
 /** Reduce the OpenAI response to the stable fields displayed by the Web card. */
 export declare function normalizeUsage(value: unknown): UsageSummary;
+declare function parseAuthority(authority: string | undefined): URL | undefined;
+declare function isLoopbackHostname(hostname: string): boolean;
+declare function isTrustedHost(authority: string | undefined, trustedHosts: readonly string[]): boolean;
+declare function isTrustedBrowserRequest(request: IncomingMessage, trustedHosts: readonly string[]): boolean;
+declare function browserCallbackUrl(authority: string | undefined, _fallbackPort: number): string | undefined;
+declare function callbackHostMatches(authority: string | undefined, redirectUri: string): boolean;
+declare function startDeviceAuthorization(signal?: AbortSignal): Promise<DeviceAuthorization>;
+declare function parseDevicePollResponse(response: Response): Promise<ParsedDevicePoll>;
+declare function pollDeviceAuthorization(device: DeviceAuthorization, signal?: AbortSignal): Promise<DeviceTokenCode>;
+export declare const internals: {
+    parseAuthority: typeof parseAuthority;
+    isLoopbackHostname: typeof isLoopbackHostname;
+    isTrustedHost: typeof isTrustedHost;
+    isTrustedBrowserRequest: typeof isTrustedBrowserRequest;
+    browserCallbackUrl: typeof browserCallbackUrl;
+    callbackHostMatches: typeof callbackHostMatches;
+    startDeviceAuthorization: typeof startDeviceAuthorization;
+    parseDevicePollResponse: typeof parseDevicePollResponse;
+    pollDeviceAuthorization: typeof pollDeviceAuthorization;
+};
 declare module '@deepseek-ai/cordis' {
     interface Context {
         openaiCodexAuth: OpenAICodexAuth;
+        webServer: WebServer;
+        webRuntime: WebRuntimeValues;
     }
 }
-/** DSH service providing login, logout, and automatically refreshed bearer tokens. */
+/** DSH service providing device-code/browser login, logout, and automatically refreshed bearer tokens. */
 export declare class OpenAICodexAuth extends Service {
     static Config: z<Config>;
     static inject: string[];
@@ -42,19 +85,37 @@ export declare class OpenAICodexAuth extends Service {
     private usageCache;
     private usageError;
     private loginFlow;
+    private startingDevice;
+    private startingBrowser;
     private lastLoginError;
     constructor(ctx: Context, config: Config);
+    private assertCredentialWritable;
+    private storeCredentialToken;
     /** Return a valid bearer token, refreshing and persisting it when near expiry. */
     bearerToken(signal?: AbortSignal): Promise<string | undefined>;
-    private createLoginRequest;
-    private finishLogin;
-    private logout;
+    private finishCredential;
+    private finishAuthorizationCode;
+    private settleFlow;
+    private beginDeviceLogin;
+    private createDeviceLogin;
     private beginBrowserLogin;
+    private createBrowserLogin;
+    private cancelLogin;
+    private logout;
     private status;
     private fetchUsage;
-    private startControlServer;
-    private controlRequest;
     private write;
-    private waitForCallback;
+    private sendJson;
+    private sendText;
+    private trustedManagementRequest;
+    private requireCsrf;
+    private handleStatus;
+    private handleDeviceStart;
+    private handleBrowserStart;
+    private handleBrowserPrepare;
+    private handleBrowserComplete;
+    private handleCallback;
+    private handleCancel;
+    private handleLogout;
 }
 export default OpenAICodexAuth;

@@ -5,6 +5,7 @@ coverage/
 .env
 .env.*
 openai-codex-auth.json
+PLAN.md
 
 lib/*
 !lib/index.js
