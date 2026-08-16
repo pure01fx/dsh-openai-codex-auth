@@ -1,56 +1,56 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" role="img" aria-labelledby="title desc">
-  <title id="title">OpenAI Codex 授权与凭据流</title>
-  <desc id="desc">浏览器通过 OpenAI OAuth 授权，经 localhost 回调写入本机凭据，再供 DSH 模型提供方和设置页用量卡使用。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="460" viewBox="0 0 1200 460" role="img" aria-labelledby="title desc">
+  <title id="title">OpenAI Codex 设备码优先授权与凭据流</title>
+  <desc id="desc">DSH 设置页显示 OpenAI 设备码，Host 后台轮询授权并原子写入凭据；浏览器 OAuth 仅在登录期间临时监听 localhost:1455 作为备用。</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0 0L10 5L0 10Z" fill="#64748B"/>
     </marker>
   </defs>
 
-  <rect width="1200" height="440" rx="26" fill="#0B0F14"/>
-  <text x="56" y="66" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="40" font-weight="750">从授权到可用凭据</text>
-  <text x="56" y="100" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="20">令牌留在 Host 侧；Web 设置页只读取状态与用量摘要。</text>
+  <rect width="1200" height="460" rx="26" fill="#0B0F14"/>
+  <text x="56" y="62" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="38" font-weight="750">设备码优先 · 浏览器回调备用</text>
+  <text x="56" y="96" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="20">令牌留在 Host；远程与反代入口无需 OAuth callback。</text>
 
-  <path d="M278 230H326" stroke="#64748B" stroke-width="3" marker-end="url(#arrow)"/>
-  <path d="M560 230H608" stroke="#64748B" stroke-width="3" marker-end="url(#arrow)"/>
-  <path d="M842 230H890" stroke="#64748B" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M278 222H326" stroke="#64748B" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M560 222H608" stroke="#64748B" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M842 222H890" stroke="#64748B" stroke-width="3" marker-end="url(#arrow)"/>
 
-  <g id="oauth" transform="translate(56 138)">
-    <rect width="222" height="190" rx="18" fill="#111821" stroke="#234A78" stroke-width="2"/>
-    <text x="22" y="36" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">01 · BROWSER</text>
-    <text x="22" y="82" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24" font-weight="700">OpenAI OAuth</text>
-    <text x="22" y="118" fill="#CBD5E1" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="19">官方授权页</text>
-    <rect x="22" y="143" width="132" height="28" rx="14" fill="#111F33"/>
-    <text x="38" y="163" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">PKCE + STATE</text>
+  <g id="device" transform="translate(56 130)">
+    <rect width="222" height="184" rx="18" fill="#111821" stroke="#234A78" stroke-width="2"/>
+    <text x="22" y="36" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">01 · DEVICE</text>
+    <text x="22" y="78" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24" font-weight="700">用户码</text>
+    <text x="22" y="114" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">codex/device</text>
+    <rect x="22" y="139" width="132" height="28" rx="14" fill="#111F33"/>
+    <text x="38" y="159" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">15 MINUTES</text>
   </g>
 
-  <g id="callback" transform="translate(326 138)">
-    <rect width="234" height="190" rx="18" fill="#111821" stroke="#1F6F5A" stroke-width="2"/>
-    <text x="22" y="36" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">02 · LOOPBACK</text>
-    <text x="22" y="82" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24" font-weight="700">本机回调</text>
-    <text x="22" y="118" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19">localhost:1455</text>
-    <text x="22" y="158" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="18">校验并交换令牌</text>
+  <g id="poll" transform="translate(326 130)">
+    <rect width="234" height="184" rx="18" fill="#111821" stroke="#1F6F5A" stroke-width="2"/>
+    <text x="22" y="36" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">02 · HOST</text>
+    <text x="22" y="78" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24" font-weight="700">后台轮询</text>
+    <text x="22" y="114" fill="#CBD5E1" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="18">交换授权码与令牌</text>
+    <text x="22" y="153" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="17">可取消 · 可超时</text>
   </g>
 
-  <g id="host" transform="translate(608 138)">
-    <rect width="234" height="190" rx="18" fill="#111821" stroke="#1F6F5A" stroke-width="2"/>
-    <text x="22" y="36" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">03 · HOST</text>
-    <text x="22" y="82" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24" font-weight="700">本地凭据</text>
-    <text x="22" y="118" fill="#CBD5E1" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="19">原子写入 · 自动刷新</text>
-    <rect x="22" y="143" width="126" height="28" rx="14" fill="#102A24"/>
-    <text x="38" y="163" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">OWNER ONLY</text>
+  <g id="credential" transform="translate(608 130)">
+    <rect width="234" height="184" rx="18" fill="#111821" stroke="#1F6F5A" stroke-width="2"/>
+    <text x="22" y="36" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">03 · CREDENTIAL</text>
+    <text x="22" y="78" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24" font-weight="700">本地凭据</text>
+    <text x="22" y="114" fill="#CBD5E1" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="18">原子写入 · 自动刷新</text>
+    <rect x="22" y="139" width="126" height="28" rx="14" fill="#102A24"/>
+    <text x="38" y="159" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">OWNER ONLY</text>
   </g>
 
-  <g id="dsh" transform="translate(890 138)">
-    <rect width="254" height="190" rx="18" fill="#111821" stroke="#334155" stroke-width="2"/>
+  <g id="dsh" transform="translate(890 130)">
+    <rect width="254" height="184" rx="18" fill="#111821" stroke="#334155" stroke-width="2"/>
     <text x="22" y="36" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">04 · DSH</text>
-    <text x="22" y="82" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24" font-weight="700">模型 + 用量</text>
-    <text x="22" y="118" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">openai-codex</text>
-    <text x="22" y="153" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="18">设置页状态与额度</text>
+    <text x="22" y="78" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="24" font-weight="700">模型 + 用量</text>
+    <text x="22" y="114" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">openai-codex</text>
+    <text x="22" y="149" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="18">状态与额度摘要</text>
   </g>
 
-  <path d="M326 366H842" stroke="#1F6F5A" stroke-width="2"/>
-  <circle cx="326" cy="366" r="6" fill="#34D399"/>
-  <circle cx="842" cy="366" r="6" fill="#34D399"/>
-  <text x="584" y="397" text-anchor="middle" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">LOCAL TRUST BOUNDARY · 127.0.0.1</text>
+  <path d="M82 365H1118" stroke="#334155" stroke-width="2"/>
+  <circle cx="82" cy="365" r="6" fill="#93C5FD"/>
+  <text x="104" y="371" fill="#CBD5E1" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="17">备用：Browser OAuth + PKCE + state → 临时 localhost:1455/auth/callback listener</text>
+  <text x="600" y="420" text-anchor="middle" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">SAME-ORIGIN MANAGEMENT · HOST-ONLY TOKENS</text>
 </svg>

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
   <title id="title">dsh-openai-codex-auth</title>
-  <desc id="desc">OpenAI Codex OAuth login and usage integration for DeepSeek Harness, shown with a connected subscription usage card.</desc>
+  <desc id="desc">Device-code-first OpenAI Codex login and usage integration for DeepSeek Harness, with browser OAuth as a loopback fallback.</desc>
 
   <rect width="1200" height="420" rx="28" fill="#0B0F14"/>
   <path d="M64 46H1136" stroke="#263241" stroke-width="2"/>
@@ -13,13 +13,13 @@
   <g id="title-block" transform="translate(64 88)">
     <text x="0" y="64" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="58" font-weight="750">dsh-openai</text>
     <text x="0" y="126" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="58" font-weight="750">codex-auth</text>
-    <text x="2" y="176" fill="#CBD5E1" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="23">订阅登录、用量查看与本地凭据接入</text>
+    <text x="2" y="176" fill="#CBD5E1" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif" font-size="23">设备码登录、用量查看与本地凭据接入</text>
 
     <g transform="translate(0 214)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="650">
       <rect width="148" height="38" rx="19" fill="#102A24" stroke="#1F6F5A"/>
-      <text x="20" y="25" fill="#6EE7B7">OAUTH + PKCE</text>
+      <text x="20" y="25" fill="#6EE7B7">DEVICE CODE</text>
       <rect x="160" width="170" height="38" rx="19" fill="#111F33" stroke="#234A78"/>
-      <text x="180" y="25" fill="#93C5FD">LOOPBACK ONLY</text>
+      <text x="180" y="25" fill="#93C5FD">OAUTH FALLBACK</text>
       <rect x="342" width="120" height="38" rx="19" fill="#171E28" stroke="#334155"/>
       <text x="363" y="25" fill="#CBD5E1">USAGE UI</text>
     </g>
