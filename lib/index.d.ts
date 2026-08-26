@@ -84,11 +84,18 @@ export declare class OpenAICodexAuth extends Service {
     private readonly csrf;
     private usageCache;
     private usageError;
+    private usageRefresh;
+    private usageGeneration;
+    private readonly codexTurns;
     private loginFlow;
     private startingDevice;
     private startingBrowser;
     private lastLoginError;
     constructor(ctx: Context, config: Config);
+    private markCodexTurn;
+    private consumeCodexTurn;
+    private performUsageRefresh;
+    private refreshUsage;
     private assertCredentialWritable;
     private storeCredentialToken;
     /** Return a valid bearer token, refreshing and persisting it when near expiry. */

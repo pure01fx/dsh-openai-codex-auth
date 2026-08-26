@@ -29,4 +29,17 @@ describe('Codex settings login gestures', () => {
     expect(source).toContain('强制继续打开 OpenAI')
     expect(source).toContain("post('/browser/complete', { input: manualInput })")
   })
+
+  it('adds a click-to-refresh quota ring without idle usage polling', () => {
+    const quotaRing = between('function CodexQuotaRing(props) {', 'function CodexSection() {')
+    expect(source).toContain("ctx.slots.inject('conversation.input.right'")
+    expect(source).toContain("id: 'openai-codex-quota'")
+    expect(quotaRing).toContain('if (previous && !running) void load(false)')
+    expect(quotaRing).toContain('void load(true)')
+    expect(source).not.toContain('30000')
+    expect(source).toContain("if (!watchLogin) return undefined")
+    expect(source).toContain("window.setInterval(() => { void load(false) }, 2000)")
+    expect(source).toContain('const statusSubscribers = new Set()')
+    expect(source.match(/const status = useSharedStatus\(\)/g)).toHaveLength(2)
+  })
 })

@@ -241,6 +241,160 @@ describe('OpenAICodexAuth routes', () => {
     harness = undefined
   })
 
+  it('refreshes usage after a Codex turn and on explicit status refresh without idle polling', async () => {
+    harness = await createHarness()
+    const token = accessToken()
+    await writeFile(join(harness.home, 'openai-codex-auth.json'), JSON.stringify({
+      version: 1,
+      credential: {
+        access: token,
+        refresh: 'refresh-token',
+        expires: Date.now() + 3_600_000,
+        accountId: 'acct_test',
+      },
+    }))
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      plan_type: 'pro',
+      rate_limit: {
+        primary_window: { used_percent: 28, limit_window_seconds: 18_000, reset_at: 2_000_000_000 },
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const initial = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(initial.body)).toMatchObject({ loggedIn: true })
+    expect(JSON.parse(initial.body)).not.toHaveProperty('usage')
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    const agent = { id: 'session-usage', session: { id: 'session-usage' } }
+    await (harness.root as any).waterfall(agent, 'agent/request', {
+      agent, turn: 1, step: 1, signal: new AbortController().signal,
+    }, () => Promise.resolve({ provider: 'openai-codex', model: 'gpt-5.6-sol' }))
+    await (harness.root as any).serial(agent, 'agent/turn-stopping', {
+      agent, turn: 1, signal: new AbortController().signal,
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+    const session = { id: 'session-usage' }
+    ;(harness.root as any).emit(session, 'session/event', session, {
+      type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, seq: 1, time: Date.now(),
+    })
+
+    const cached = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(cached.body)).toMatchObject({
+      usage: { planType: 'pro', primary: { usedPercent: 28, windowSeconds: 18_000 } },
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await (harness.root as any).waterfall(agent, 'agent/request', {
+      agent, turn: 2, step: 1, signal: new AbortController().signal,
+    }, () => Promise.resolve({ provider: 'anthropic', model: 'claude' }))
+    ;(harness.root as any).emit(session, 'session/event', session, {
+      type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } }, seq: 2, time: Date.now(),
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status?refresh=1', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('runs a trailing refresh when another Codex turn ends during an active usage request', async () => {
+    harness = await createHarness()
+    await writeFile(join(harness.home, 'openai-codex-auth.json'), JSON.stringify({
+      version: 1,
+      credential: {
+        access: accessToken(),
+        refresh: 'refresh-token',
+        expires: Date.now() + 3_600_000,
+        accountId: 'acct_test',
+      },
+    }))
+    let resolveFirst!: (response: Response) => void
+    let resolveSecond!: (response: Response) => void
+    const firstResponse = new Promise<Response>((resolve) => { resolveFirst = resolve })
+    const secondResponse = new Promise<Response>((resolve) => { resolveSecond = resolve })
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => firstResponse)
+      .mockImplementationOnce(() => secondResponse)
+    vi.stubGlobal('fetch', fetchMock)
+    const agent = { id: 'session-overlap', session: { id: 'session-overlap' } }
+    const session = { id: 'session-overlap' }
+
+    await (harness.root as any).waterfall(agent, 'agent/request', {
+      agent, turn: 1, step: 1, signal: new AbortController().signal,
+    }, () => Promise.resolve({ provider: 'openai-codex', model: 'gpt-5.6-sol' }))
+    ;(harness.root as any).emit(session, 'session/event', session, {
+      type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, seq: 1, time: Date.now(),
+    })
+    await vi.waitFor(() => { expect(fetchMock).toHaveBeenCalledTimes(1) })
+
+    await (harness.root as any).waterfall(agent, 'agent/request', {
+      agent, turn: 2, step: 1, signal: new AbortController().signal,
+    }, () => Promise.resolve({ provider: 'openai-codex', model: 'gpt-5.6-sol' }))
+    ;(harness.root as any).emit(session, 'session/event', session, {
+      type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } }, seq: 2, time: Date.now(),
+    })
+    let statusSettled = false
+    const statusPromise = call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    })).then((value) => {
+      statusSettled = true
+      return value
+    })
+
+    resolveFirst(new Response(JSON.stringify({
+      rate_limit: { primary_window: { used_percent: 10 } },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    await vi.waitFor(() => { expect(fetchMock).toHaveBeenCalledTimes(2) })
+    expect(statusSettled).toBe(false)
+    resolveSecond(new Response(JSON.stringify({
+      rate_limit: { primary_window: { used_percent: 22 } },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+
+    const status = await statusPromise
+    expect(JSON.parse(status.body)).toHaveProperty('usage.primary.usedPercent', 22)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears prior-account usage as soon as a new credential file is published', async () => {
+    harness = await createHarness()
+    await writeFile(join(harness.home, 'openai-codex-auth.json'), JSON.stringify({
+      version: 1,
+      credential: {
+        access: accessToken('acct_old'),
+        refresh: 'old-refresh',
+        expires: Date.now() + 3_600_000,
+        accountId: 'acct_old',
+      },
+    }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      rate_limit: { primary_window: { used_percent: 91 } },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })))
+    const seeded = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status?refresh=1', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(seeded.body)).toHaveProperty('usage.primary.usedPercent', 91)
+
+    vi.spyOn(harness.credentials, 'set').mockRejectedValueOnce(new Error('credential publication failed'))
+    await expect((harness.root.openaiCodexAuth as any).finishCredential({
+      access: accessToken('acct_new'),
+      refresh: 'new-refresh',
+      expires: Date.now() + 3_600_000,
+      accountId: 'acct_new',
+    }, new AbortController().signal)).rejects.toThrow('credential publication failed')
+
+    const status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(status.body)).toMatchObject({ loggedIn: true, accountId: 'acct_new' })
+    expect(JSON.parse(status.body)).not.toHaveProperty('usage')
+  })
+
   it('starts, redacts, and cancels a device-code flow', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({

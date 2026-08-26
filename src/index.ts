@@ -2,6 +2,8 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-session'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -29,7 +31,6 @@ const SLOW_DOWN_INCREMENT_MS = 5_000
 const DEFAULT_FILENAME = 'openai-codex-auth.json'
 const TOKEN_REF = credentialRef('DSH_OPENAI_CODEX_TOKEN')
 const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
-const USAGE_CACHE_MS = 30_000
 const MAX_ERROR_BODY_LENGTH = 1_024
 const MAX_REQUEST_BODY_LENGTH = 8_192
 
@@ -588,6 +589,9 @@ export class OpenAICodexAuth extends Service {
   private readonly csrf = base64Url(randomBytes(24))
   private usageCache: UsageSummary | undefined
   private usageError: string | undefined
+  private usageRefresh: { promise: Promise<void>; queued: boolean } | undefined
+  private usageGeneration = 0
+  private readonly codexTurns = new Map<string, Set<number>>()
   private loginFlow: LoginFlow | undefined
   private startingDevice: { abort: AbortController; promise: Promise<DeviceLoginFlow> } | undefined
   private startingBrowser: { abort: AbortController; servers: Server[]; promise: Promise<BrowserLoginFlow> } | undefined
@@ -606,6 +610,18 @@ export class OpenAICodexAuth extends Service {
       }
       return () => {}
     }, 'openai-codex-auth: bootstrap credential')
+    ctx.on('agent/request', async ({ agent, turn }, next) => {
+      const request = await next()
+      if (request.provider === 'openai-codex') this.markCodexTurn(String(agent.id), turn)
+      return request
+    }, { global: true, prepend: true })
+    ctx.on('session/event', (session, event) => {
+      if (event.type !== 'turn/end' || !this.consumeCodexTurn(String(session.id), event.data.turn)) return
+      void this.refreshUsage(true)
+    }, { global: true })
+    ctx.on('agent/disposed', ({ agent }) => {
+      this.codexTurns.delete(String(agent.id))
+    }, { global: true })
     ctx.effect(() => {
       const timer = setInterval(() => {
         void this.bearerToken()
@@ -652,6 +668,63 @@ export class OpenAICodexAuth extends Service {
     }, 'openai-codex-auth: Web routes')
   }
 
+  private markCodexTurn(sessionId: string, turn: number): void {
+    const turns = this.codexTurns.get(sessionId) ?? new Set<number>()
+    turns.add(turn)
+    this.codexTurns.set(sessionId, turns)
+  }
+
+  private consumeCodexTurn(sessionId: string, turn: number): boolean {
+    const turns = this.codexTurns.get(sessionId)
+    if (turns === undefined || !turns.delete(turn)) return false
+    if (turns.size === 0) this.codexTurns.delete(sessionId)
+    return true
+  }
+
+  private async performUsageRefresh(generation: number): Promise<void> {
+    try {
+      const credential = await readCredential(this.filename)
+      if (credential === undefined) {
+        if (this.usageGeneration === generation) {
+          this.usageCache = undefined
+          this.usageError = undefined
+        }
+        return
+      }
+      const usage = await this.fetchUsage(credential)
+      if (this.usageGeneration === generation) {
+        this.usageCache = usage
+        this.usageError = undefined
+      }
+    } catch (error) {
+      if (this.usageGeneration === generation) this.usageError = messageOf(error)
+    }
+  }
+
+  private refreshUsage(queueIfActive = false): Promise<void> {
+    const active = this.usageRefresh
+    if (active !== undefined) {
+      if (queueIfActive) active.queued = true
+      return active.promise
+    }
+    const cycle: { promise: Promise<void>; queued: boolean } = {
+      promise: Promise.resolve(),
+      queued: false,
+    }
+    this.usageRefresh = cycle
+    cycle.promise = (async () => {
+      try {
+        do {
+          cycle.queued = false
+          await this.performUsageRefresh(this.usageGeneration)
+        } while (cycle.queued)
+      } finally {
+        if (this.usageRefresh === cycle) this.usageRefresh = undefined
+      }
+    })()
+    return cycle.promise
+  }
+
   private async assertCredentialWritable(): Promise<void> {
     const info = await this.ctx.credentials.describe(TOKEN_REF)
     if (!info.writable) {
@@ -689,10 +762,12 @@ export class OpenAICodexAuth extends Service {
       if (signal.aborted) throw new Error('OpenAI login cancelled')
       await this.write(credential)
     })
-    if (signal.aborted) throw new Error('OpenAI login cancelled')
-    await this.ctx.credentials.set(TOKEN_REF, credential.access)
+    this.usageGeneration += 1
+    if (this.usageRefresh !== undefined) this.usageRefresh.queued = true
     this.usageCache = undefined
     this.usageError = undefined
+    if (signal.aborted) throw new Error('OpenAI login cancelled')
+    await this.ctx.credentials.set(TOKEN_REF, credential.access)
     this.lastLoginError = undefined
   }
 
@@ -920,6 +995,8 @@ export class OpenAICodexAuth extends Service {
     } catch (error) {
       unsetError = error
     }
+    this.usageGeneration += 1
+    if (this.usageRefresh !== undefined) this.usageRefresh.queued = false
     this.usageCache = undefined
     this.usageError = undefined
     this.lastLoginError = undefined
@@ -943,14 +1020,8 @@ export class OpenAICodexAuth extends Service {
       } catch (error) {
         this.usageError = messageOf(error)
       }
-      if (refresh || this.usageCache === undefined || Date.now() - this.usageCache.fetchedAt > USAGE_CACHE_MS) {
-        try {
-          this.usageCache = await this.fetchUsage(credential)
-          this.usageError = undefined
-        } catch (error) {
-          this.usageError = messageOf(error)
-        }
-      }
+      if (refresh) await this.refreshUsage(true)
+      else if (this.usageRefresh !== undefined) await this.usageRefresh.promise
     }
     const flow = this.loginFlow
     const startingMethod = this.startingDevice !== undefined
@@ -989,7 +1060,7 @@ export class OpenAICodexAuth extends Service {
         accept: 'application/json',
         authorization: `Bearer ${access}`,
         'chatgpt-account-id': credential.accountId,
-        'user-agent': 'dsh-openai-codex-auth/0.4.0',
+        'user-agent': 'dsh-openai-codex-auth/0.5.0',
       },
     })
     if (!response.ok) throw new Error(`Codex usage request failed (HTTP ${response.status})`)

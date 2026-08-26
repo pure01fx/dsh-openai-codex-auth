@@ -73,6 +73,7 @@ http://localhost:1455/auth/callback
 | 设备码登录 | 无本机 callback，支持远程/headless 使用 |
 | 浏览器 OAuth fallback | PKCE + state、端到端 1455 探测、手动 code 回填和临时 callback listener |
 | Codex 用量面板 | 展示短周期与周用量、剩余额度和重置时间 |
+| 输入框额度圈 | 登录后显示在输入框右下角；Codex turn 结束或点击圆圈时刷新，不做常驻额度轮询 |
 | 自动凭据续期 | 在令牌接近过期时刷新，并更新 DSH credentials |
 | DSH 模型接入 | 将有效令牌提供给 `openai-codex` 模型提供方 |
 | 登录生命周期管理 | 支持取消、15 分钟设备码超时、10 分钟浏览器超时和安全退出 |
@@ -89,7 +90,8 @@ http://localhost:1455/auth/callback
 1. 凭据以 owner-only 权限原子写入 `$DSH_HOME/openai-codex-auth.json`。
 2. access token 通过 DSH credentials 注入 `DSH_OPENAI_CODEX_TOKEN`。
 3. `openai-codex` 模型提供方在请求时读取该凭据。
-4. 设置页只读取登录状态、账号 ID、过期时间和用量摘要，不接触 token。
+4. 输入框右下角显示 Codex 额度圈；插件在 Codex turn 结束或用户点击圆圈时读取用量，不运行常驻额度轮询。
+5. 设置页与额度圈只读取登录状态、账号 ID、过期时间和用量摘要，不接触 token。
 
 ## 同源路由
 

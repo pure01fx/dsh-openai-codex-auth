@@ -9,6 +9,9 @@ window.__ModuleLoader__.load({
     const { createElement: h, useCallback, useEffect, useMemo, useRef, useState } = React
     const BASE = '/openai-codex'
     const PLUGIN_ID = 'dsh-openai-codex-auth'
+    const statusSubscribers = new Set()
+    let sharedStatus = null
+    let statusRequestGeneration = 0
 
     const css = `
       .codexSection{box-sizing:border-box;max-width:720px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px}
@@ -43,7 +46,11 @@ window.__ModuleLoader__.load({
       .codexProbeIcon{display:grid;place-items:center;width:20px;height:20px;flex:0 0 auto;border:1px solid currentColor;border-radius:50%;font-weight:700}.codexProbeText strong{display:block;font-size:13px;font-weight:500}.codexProbeEndpoint{display:block;margin-top:3px;color:var(--dsw-alias-label-tertiary);font:12px/18px ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
       .codexField{display:block;margin-top:14px}.codexFieldLabel{display:block;margin-bottom:6px;color:var(--dsw-alias-label-secondary);font-size:12px}.codexInput{display:block;width:100%;min-height:36px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:7px 10px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:13px/20px ui-monospace,SFMono-Regular,Consolas,monospace}.codexInput:focus{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.codexInput::placeholder{color:var(--dsw-alias-label-dimmed)}
       .codexEmpty{padding:4px 0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}.codexSkeleton{height:8px;margin:10px 0;border-radius:99px;background:linear-gradient(90deg,var(--dsw-alias-bg-layer-2),var(--dsw-alias-interactive-bg-hover-solid),var(--dsw-alias-bg-layer-2));background-size:200% 100%;animation:codexPulse 1.2s infinite}
-      @keyframes codexPulse{to{background-position:-200% 0}}@media(prefers-reduced-motion:reduce){.codexSkeleton{animation:none}}@media(max-width:620px){.codexHero{padding:14px;flex-direction:column}.codexBody{padding:14px}.codexGrid{grid-template-columns:1fr}.codexCode{font-size:20px}}
+      .codexQuotaRoot{display:inline-flex;position:relative}.codexQuotaTrigger{width:28px;height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:transparent;border:none;border-radius:999px;flex:none;place-items:center;display:grid}.codexQuotaTrigger:hover{background:var(--dsw-alias-interactive-bg-hover)}.codexQuotaTrigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+      .codexQuotaTrack{fill:none;stroke:var(--dsw-alias-border-l3);stroke-width:2px}.codexQuotaFill{fill:none;stroke:var(--dsw-alias-state-success-primary);stroke-width:2px;stroke-linecap:round;transition:stroke-dasharray .25s ease}.codexQuotaFill.high{stroke:var(--dsw-alias-state-warn-label)}.codexQuotaFill.critical{stroke:var(--dsw-alias-state-error-primary)}.codexQuotaLoading{animation:codexQuotaPulse .8s ease-in-out infinite alternate}
+      .codexQuotaPanel{z-index:100;box-sizing:border-box;width:272px;border:1px solid var(--dsw-alias-border-inverted);border-radius:12px;padding:12px;background:var(--dsw-specific-menu);box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-secondary);cursor:default;font-size:12px;line-height:20px;position:absolute;right:0;bottom:calc(100% + 8px)}.codexQuotaPanelHead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.codexQuotaPanelHead strong{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500}.codexQuotaPanelHead span{color:var(--dsw-alias-label-tertiary)}
+      .codexQuotaWindow{padding:7px 0}.codexQuotaWindow+.codexQuotaWindow{border-top:1px solid var(--dsw-alias-border-l2)}.codexQuotaWindowHead{display:flex;align-items:center;justify-content:space-between;gap:10px}.codexQuotaWindowHead strong{font-weight:500;color:var(--dsw-alias-label-secondary)}.codexQuotaWindowHead span{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}.codexQuotaBar{height:4px;margin:6px 0;border-radius:999px;overflow:hidden;background:var(--dsw-alias-interactive-bg-hover)}.codexQuotaBarFill{height:100%;border-radius:inherit;background:var(--dsw-alias-state-success-primary)}.codexQuotaBarFill.high{background:var(--dsw-alias-state-warn-label)}.codexQuotaBarFill.critical{background:var(--dsw-alias-state-error-primary)}.codexQuotaReset{color:var(--dsw-alias-label-tertiary)}.codexQuotaMessage{margin:4px 0;color:var(--dsw-alias-label-tertiary)}.codexQuotaMessage.error{color:var(--dsw-alias-state-error-primary)}
+      @keyframes codexPulse{to{background-position:-200% 0}}@keyframes codexQuotaPulse{to{opacity:.35}}@media(prefers-reduced-motion:reduce){.codexSkeleton,.codexQuotaLoading{animation:none}}@media(max-width:620px){.codexHero{padding:14px;flex-direction:column}.codexBody{padding:14px}.codexGrid{grid-template-columns:1fr}.codexCode{font-size:20px}}
     `
     if (typeof document !== 'undefined' && document.querySelector('style[data-plugin="' + PLUGIN_ID + '"]') === null) {
       const style = document.createElement('style')
@@ -54,6 +61,29 @@ window.__ModuleLoader__.load({
 
     function messageOf(error) {
       return error instanceof Error ? error.message : String(error)
+    }
+
+    function publishStatus(value) {
+      sharedStatus = value
+      for (const subscriber of statusSubscribers) subscriber(value)
+    }
+
+    function useSharedStatus() {
+      const [status, setStatus] = useState(sharedStatus)
+      useEffect(() => {
+        statusSubscribers.add(setStatus)
+        return () => { statusSubscribers.delete(setStatus) }
+      }, [])
+      return status
+    }
+
+    async function requestStatus(refresh) {
+      const generation = ++statusRequestGeneration
+      const response = await fetch(BASE + '/status' + (refresh ? '?refresh=1' : ''), { cache: 'no-store' })
+      const value = await response.json()
+      if (!response.ok) throw new Error(value.error || 'HTTP ' + response.status)
+      if (generation === statusRequestGeneration) publishStatus(value)
+      return value
     }
 
     function shortAccount(value) {
@@ -118,8 +148,128 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function quotaTone(used) {
+      return used >= 95 ? ' critical' : used >= 80 ? ' high' : ''
+    }
+
+    function quotaWindowName(window, secondary) {
+      if (secondary) return '周额度'
+      return window && window.windowSeconds === 18000 ? '5 小时额度' : '短周期额度'
+    }
+
+    function QuotaWindow(props) {
+      const used = Math.max(0, Math.min(100, Number(props.window.usedPercent) || 0))
+      const remaining = Math.max(0, Math.round(100 - used))
+      const tone = quotaTone(used)
+      return h('div', { className: 'codexQuotaWindow' },
+        h('div', { className: 'codexQuotaWindowHead' },
+          h('strong', null, props.name),
+          h('span', null, '剩余 ' + remaining + '%'),
+        ),
+        h('div', { className: 'codexQuotaBar', role: 'progressbar', 'aria-label': props.name, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': used },
+          h('div', { className: 'codexQuotaBarFill' + tone, style: { width: used + '%' } }),
+        ),
+        h('div', { className: 'codexQuotaReset' }, formatReset(props.window.resetAt)),
+      )
+    }
+
+    function CodexQuotaRing(props) {
+      const running = props.useSession((snapshot) => snapshot.running)
+      const status = useSharedStatus()
+      const [open, setOpen] = useState(false)
+      const [loading, setLoading] = useState(false)
+      const [error, setError] = useState('')
+      const rootRef = useRef(null)
+      const wasRunning = useRef(running)
+      const loadGeneration = useRef(0)
+
+      const load = useCallback(async (refresh) => {
+        const generation = ++loadGeneration.current
+        if (refresh) setLoading(true)
+        try {
+          await requestStatus(refresh)
+          if (generation !== loadGeneration.current) return
+          setError('')
+        } catch (loadError) {
+          if (generation !== loadGeneration.current) return
+          setError(messageOf(loadError))
+        } finally {
+          if (generation === loadGeneration.current) setLoading(false)
+        }
+      }, [])
+
+      useEffect(() => { void load(false) }, [load])
+      useEffect(() => {
+        const previous = wasRunning.current
+        wasRunning.current = running
+        if (previous && !running) void load(false)
+      }, [load, running])
+      useEffect(() => {
+        if (!open) return undefined
+        const onPointerDown = (event) => {
+          if (event.target instanceof Node && rootRef.current && rootRef.current.contains(event.target)) return
+          setOpen(false)
+        }
+        const onKeyDown = (event) => { if (event.key === 'Escape') setOpen(false) }
+        document.addEventListener('pointerdown', onPointerDown)
+        document.addEventListener('keydown', onKeyDown)
+        return () => {
+          document.removeEventListener('pointerdown', onPointerDown)
+          document.removeEventListener('keydown', onKeyDown)
+        }
+      }, [open])
+
+      if (!status || !status.loggedIn) return null
+      const usage = status.usage
+      const primary = usage && usage.primary
+      const secondary = usage && usage.secondary
+      const meter = primary || secondary
+      const used = meter ? Math.max(0, Math.min(100, Number(meter.usedPercent) || 0)) : 0
+      const reading = meter ? Math.max(0, Math.round(100 - used)) + '%' : '待更新'
+      const title = loading ? '正在刷新 Codex 额度' : 'Codex 额度剩余 ' + reading
+      const circumference = 2 * Math.PI * 5.5
+      const windows = []
+      if (primary) windows.push({ name: quotaWindowName(primary, false), window: primary })
+      if (secondary) windows.push({ name: quotaWindowName(secondary, true), window: secondary })
+
+      return h('span', { ref: rootRef, className: 'codexQuotaRoot' },
+        h('button', {
+          type: 'button',
+          className: 'codexQuotaTrigger' + (loading ? ' codexQuotaLoading' : ''),
+          title,
+          'aria-label': title,
+          'aria-haspopup': 'dialog',
+          'aria-expanded': open,
+          onClick: () => {
+            setOpen((value) => !value)
+            void load(true)
+          },
+        },
+        h('svg', { viewBox: '0 0 14 14', width: '14', height: '14', 'aria-hidden': true },
+          h('circle', { className: 'codexQuotaTrack', cx: '7', cy: '7', r: '5.5' }),
+          meter ? h('circle', {
+            className: 'codexQuotaFill' + quotaTone(used),
+            cx: '7', cy: '7', r: '5.5',
+            strokeDasharray: (circumference * used / 100) + ' ' + circumference,
+            transform: 'rotate(-90 7 7)',
+          }) : null,
+        )),
+        open ? h('div', { className: 'codexQuotaPanel', role: 'dialog', 'aria-label': 'OpenAI Codex 额度' },
+          h('div', { className: 'codexQuotaPanelHead' },
+            h('strong', null, 'Codex 额度'),
+            h('span', null, loading ? '刷新中…' : usage && usage.fetchedAt ? new Date(usage.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '尚未读取'),
+          ),
+          windows.length > 0
+            ? windows.map((row) => h(QuotaWindow, { key: row.name, name: row.name, window: row.window }))
+            : h('p', { className: 'codexQuotaMessage' }, '点击圆圈读取最新额度。'),
+          status.usageError ? h('p', { className: 'codexQuotaMessage error', role: 'status' }, '额度读取失败：' + status.usageError) : null,
+          error ? h('p', { className: 'codexQuotaMessage error', role: 'status' }, '无法连接额度接口：' + error) : null,
+        ) : null,
+      )
+    }
+
     function CodexSection() {
-      const [status, setStatus] = useState(null)
+      const status = useSharedStatus()
       const [error, setError] = useState('')
       const [busy, setBusy] = useState('')
       const [watchLogin, setWatchLogin] = useState(false)
@@ -131,10 +281,7 @@ window.__ModuleLoader__.load({
 
       const load = useCallback(async (refresh) => {
         try {
-          const response = await fetch(BASE + '/status' + (refresh ? '?refresh=1' : ''), { cache: 'no-store' })
-          const value = await response.json()
-          if (!response.ok) throw new Error(value.error || 'HTTP ' + response.status)
-          setStatus(value)
+          const value = await requestStatus(refresh)
           setError('')
           setWatchLogin(Boolean(value.loginPending))
         } catch (loadError) {
@@ -144,7 +291,8 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         void load(false)
-        const timer = window.setInterval(() => { void load(false) }, watchLogin ? 2000 : 30000)
+        if (!watchLogin) return undefined
+        const timer = window.setInterval(() => { void load(false) }, 2000)
         return () => { window.clearInterval(timer) }
       }, [load, watchLogin])
 
@@ -434,6 +582,12 @@ window.__ModuleLoader__.load({
         order: 11,
         label: () => 'OpenAI Codex',
       }, CodexSection))
+      ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+        name: 'conversation.input.right',
+        id: 'openai-codex-quota',
+        order: 100,
+        label: () => 'OpenAI Codex 额度',
+      }, CodexQuotaRing))
     }
 
     exports.inject = inject
