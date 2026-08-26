@@ -1,5 +1,5 @@
 {
-  "name": "dsh-openai-codex-auth",
+  "name": "@pure01fx/dsh-openai-codex-auth",
   "version": "0.5.0",
   "description": "Device-code-first OpenAI Codex login and same-origin Web integration for DeepSeek Harness",
   "license": "MIT",

@@ -6,4 +6,4 @@
 
 - insert:
     - id: openai-codex-auth
-      name: dsh-openai-codex-auth
+      name: '@pure01fx/dsh-openai-codex-auth'

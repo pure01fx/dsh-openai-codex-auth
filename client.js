@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: 'dsh-openai-codex-auth',
+  id: '@pure01fx/dsh-openai-codex-auth',
   factory: (require) => {
     var module = { exports: {} }
     var exports = module.exports
@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { createElement: h, useCallback, useEffect, useMemo, useRef, useState } = React
     const BASE = '/openai-codex'
-    const PLUGIN_ID = 'dsh-openai-codex-auth'
+    const PLUGIN_ID = '@pure01fx/dsh-openai-codex-auth'
     const statusSubscribers = new Set()
     let sharedStatus = null
     let statusRequestGeneration = 0

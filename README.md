@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="dsh-openai-codex-auth：在 DeepSeek Harness 中通过设备码或本机浏览器 OAuth 登录 OpenAI Codex、查看用量并接入模型提供方">
+  <img src="./assets/readme/hero.svg" width="100%" alt="@pure01fx/dsh-openai-codex-auth：在 DeepSeek Harness 中通过设备码或本机浏览器 OAuth 登录 OpenAI Codex、查看用量并接入模型提供方">
 </p>
 
 <p align="center">
@@ -17,7 +17,13 @@
 
 ## 快速开始
 
-将插件安装到 DSH 的 `web` profile。开发 checkout 可直接使用本地路径：
+将插件安装到 DSH 的 `web` profile：
+
+```sh
+dsh plugin --profile web add @pure01fx/dsh-openai-codex-auth
+```
+
+开发 checkout 也可直接使用本地路径：
 
 ```sh
 dsh plugin --profile web add /absolute/path/to/dsh-openai-codex-auth
@@ -160,7 +166,7 @@ $DSH_HOME/openai-codex-auth.json
 ```yaml
 - insert:
     - id: openai-codex-auth
-      name: dsh-openai-codex-auth
+      name: '@pure01fx/dsh-openai-codex-auth'
       config:
         path: /secure/path/openai-codex-auth.json
 ```
