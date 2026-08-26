@@ -41,5 +41,8 @@ describe('Codex settings login gestures', () => {
     expect(source).toContain("window.setInterval(() => { void load(false) }, 2000)")
     expect(source).toContain('const statusSubscribers = new Set()')
     expect(source.match(/const status = useSharedStatus\(\)/g)).toHaveLength(2)
+    expect(quotaRing).toContain("className: 'codexQuotaAvailable' + quotaTone(used)")
+    expect(quotaRing).toContain("className: 'codexQuotaConsumed'")
+    expect(quotaRing).toContain('strokeDasharray: (circumference * used / 100)')
   })
 })
