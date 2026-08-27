@@ -1,5 +1,6 @@
 /** Native Codex model discovery, validation, and account-partitioned caching. */
 import { createHash } from 'node:crypto'
+import { nativeCodexEndpoint } from './endpoint.js'
 import { attributionHeaders, LlmError } from '@deepseek-ai/dsh-llm'
 
 export const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models'
@@ -301,7 +302,7 @@ export class NativeCodexCatalog implements NativeCodexModelCatalog {
   private currentEtag: string | undefined
 
   constructor(private readonly options: NativeCodexCatalogOptions) {
-    this.endpoint = options.endpoint ?? CODEX_MODELS_URL
+    this.endpoint = nativeCodexEndpoint(options.endpoint ?? CODEX_MODELS_URL).toString()
     this.clientVersion = options.clientVersion ?? CODEX_CLIENT_VERSION
     this.cacheTtlMs = options.cacheTtlMs ?? CODEX_CATALOG_CACHE_TTL_MS
     this.maxStaleMs = options.maxStaleMs ?? CODEX_CATALOG_MAX_STALE_MS

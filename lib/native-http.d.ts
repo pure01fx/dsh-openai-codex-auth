@@ -27,6 +27,14 @@ export interface NativeCodexHttpOptions {
     onCompleted?: () => void;
     warn?: (message: string) => void;
 }
+export interface NativeCodexPreparedRequest {
+    generation: GenerateOptions;
+    mode: NativeCodexTransportMode;
+    request: Record<string, unknown>;
+    body: string;
+    routingId: string;
+    routingHint: string;
+}
 /** HTTP Responses transport. It never retains a credential outside one attempt. */
 export declare class NativeCodexHttpTransport {
     private readonly options;
@@ -41,6 +49,8 @@ export declare class NativeCodexHttpTransport {
     constructor(options: NativeCodexHttpOptions);
     private retryDelay;
     private wait;
+    endpointUrl(): string;
+    prepare(generation: GenerateOptions, mode?: NativeCodexTransportMode): Promise<NativeCodexPreparedRequest>;
     stream(generation: GenerateOptions, mode?: NativeCodexTransportMode): AsyncIterable<StreamChunk>;
 }
 export {};

@@ -24,6 +24,17 @@ function response(body = FIXTURE, init: ResponseInit = {}): Response {
 }
 
 describe('NativeCodexCatalog', () => {
+  it('rejects unsupported credential-bearing catalog authorities', () => {
+    for (const endpoint of [
+      'http://127.attacker.example/models',
+      'https://attacker.example/models',
+    ]) {
+      expect(() => new NativeCodexCatalog({
+        endpoint,
+        resolveCredential: async () => CREDENTIAL,
+      })).toThrowError(expect.objectContaining({ code: 'INVALID_ARGS' }))
+    }
+  })
   afterEach(() => {
     vi.restoreAllMocks()
   })

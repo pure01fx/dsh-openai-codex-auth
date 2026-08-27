@@ -553,15 +553,68 @@ export class ResponsesStreamTranslator {
 
 export interface StreamResponsesOptions extends ParseSseOptions {
   onMalformedEvent?: () => void
+  onEvent?: (event: ResponsesStreamEvent) => void
   replayContext?: ResponsesReplayContext
+  maxResponseBytes?: number
+  maxResponseEvents?: number
+}
+
+/** Validate one opaque sticky turn token before retaining or forwarding it. */
+export function boundedCodexTurnState(value: unknown): string | undefined {
+  let candidate = value
+  for (let depth = 0; depth < 8 && Array.isArray(candidate); depth++) candidate = candidate[0]
+  return typeof candidate === 'string' && candidate.length > 0
+    && Buffer.byteLength(candidate) <= 4096 && !/[\r\n\0]/u.test(candidate)
+    ? candidate : undefined
+}
+
+/** Extract the bounded sticky turn token from provider metadata/event shapes. */
+export function codexResponseTurnState(event: ResponsesStreamEvent): string | undefined {
+  const row = event as unknown as Record<string, unknown>
+  const response = typeof row.response === 'object' && row.response !== null
+    ? row.response as Record<string, unknown> : undefined
+  const direct = row.turn_state ?? response?.turn_state
+  const boundedDirect = boundedCodexTurnState(direct)
+  if (boundedDirect !== undefined) return boundedDirect
+  const headers = typeof row.headers === 'object' && row.headers !== null
+    ? row.headers as Record<string, unknown> : undefined
+  if (headers === undefined) return undefined
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === 'x-codex-turn-state') {
+      const bounded = boundedCodexTurnState(value)
+      if (bounded !== undefined) return bounded
+    }
+  }
+  return undefined
 }
 
 /** Consume framed SSE JSON into DSH chunks. */
 export async function* streamResponses(
   stream: ReadableStream<Uint8Array>, options: StreamResponsesOptions = {},
 ): AsyncGenerator<StreamChunk> {
+  const byteLimit = options.maxResponseBytes ?? 24 * 1024 * 1024
+  const eventLimit = options.maxResponseEvents ?? 4096
+  if (!Number.isSafeInteger(byteLimit) || byteLimit <= 0 || byteLimit > 24 * 1024 * 1024
+    || !Number.isSafeInteger(eventLimit) || eventLimit <= 0 || eventLimit > 4096) {
+    throw fixedError('native Codex response limit is invalid', 'INVALID_CONFIG')
+  }
+  let responseBytes = 0
+  let responseEvents = 0
   const translator = new ResponsesStreamTranslator(options.replayContext)
-  for await (const frame of parseSse(stream, options)) {
+  for await (const frame of parseSse(stream, {
+    ...options,
+    onBytes: (bytes) => {
+      options.onBytes?.(bytes)
+      responseBytes += bytes
+      if (responseBytes > byteLimit) {
+        throw fixedError('native Codex response exceeded the size limit', 'RESPONSE_TOO_LARGE')
+      }
+    },
+  })) {
+    responseEvents += 1
+    if (responseEvents > eventLimit) {
+      throw fixedError('native Codex response had too many events', 'RESPONSE_TOO_LARGE')
+    }
     let event: ResponsesStreamEvent
     try { event = JSON.parse(frame.data) as ResponsesStreamEvent } catch {
       options.onMalformedEvent?.()
@@ -571,6 +624,7 @@ export async function* streamResponses(
       options.onMalformedEvent?.()
       continue
     }
+    options.onEvent?.(event)
     yield* translator.push(event)
     if (translator.terminated) return
   }

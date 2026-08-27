@@ -10,6 +10,10 @@ export interface NativeCodexTransportMode {
     serviceTier?: typeof CODEX_FAST_SERVICE_TIER;
     publicModel?: string;
     authorityHash?: string;
+    /** Turn-scoped sticky routing state captured from a provider response. */
+    turnState?: string;
+    /** @internal Receives a newly observed bounded turn-state token. */
+    captureTurnState?: (state: string) => void;
 }
 export interface NativeCodexTransport {
     stream(options: GenerateOptions, mode?: NativeCodexTransportMode): AsyncIterable<StreamChunk>;

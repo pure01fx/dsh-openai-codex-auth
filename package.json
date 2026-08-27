@@ -32,10 +32,18 @@
     "lib/index.d.ts",
     "lib/catalog.js",
     "lib/catalog.d.ts",
+    "lib/endpoint.js",
+    "lib/endpoint.d.ts",
     "lib/native-adapter.js",
     "lib/native-adapter.d.ts",
     "lib/native-http.js",
     "lib/native-http.d.ts",
+    "lib/native-websocket.js",
+    "lib/native-websocket.d.ts",
+    "lib/native-websocket-session.js",
+    "lib/native-websocket-session.d.ts",
+    "lib/native-websocket-socket.js",
+    "lib/native-websocket-socket.d.ts",
     "lib/responses.js",
     "lib/responses.d.ts",
     "lib/replay.js",
@@ -77,7 +85,8 @@
     "@deepseek-ai/dsh-atomic-write": "^0.1.0-rc.5",
     "@deepseek-ai/dsh-credentials": "^0.1.0-rc.5",
     "@deepseek-ai/dsh-home-paths": "^0.1.0-rc.5",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "ws": "8.21.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

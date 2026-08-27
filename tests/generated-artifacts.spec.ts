@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import OpenAICodexAuth from '../lib/index.js'
 import { NativeCodexCatalog } from '../lib/catalog.js'
 import { NativeCodexHttpTransport } from '../lib/native-http.js'
+import { NativeCodexWebSocketTransport } from '../lib/native-websocket.js'
 import { codexRequestBody } from '../lib/responses.js'
 import { parseSse } from '../lib/sse.js'
 import { createNativeCodexReplayState, replayAssistantInput } from '../lib/replay.js'
@@ -20,6 +21,7 @@ describe('generated package artifacts', () => {
     expect(OpenAICodexAuth).toBeTypeOf('function')
     expect(NativeCodexCatalog).toBeTypeOf('function')
     expect(NativeCodexHttpTransport).toBeTypeOf('function')
+    expect(NativeCodexWebSocketTransport).toBeTypeOf('function')
     expect(codexRequestBody).toBeTypeOf('function')
     expect(parseSse).toBeTypeOf('function')
     expect(createNativeCodexReplayState).toBeTypeOf('function')
@@ -95,7 +97,8 @@ describe('generated package artifacts', () => {
         '--declarationDir', temporary,
       ])
       const modules = [
-        'catalog', 'index', 'native-adapter', 'native-http',
+        'catalog', 'endpoint', 'index', 'native-adapter', 'native-http',
+        'native-websocket', 'native-websocket-session', 'native-websocket-socket',
         'replay', 'responses', 'sse',
       ]
       for (const module of modules) {

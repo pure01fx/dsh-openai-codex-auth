@@ -57,9 +57,95 @@ async function loopback(
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 describe('NativeCodexHttpTransport', () => {
+  it('cleans watchdog timers when the stream consumer returns early', async () => {
+    vi.useFakeTimers()
+    let cancelled = false
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode([
+          'data: {"type":"response.output_text.delta","item_id":"msg-early","delta":"partial"}',
+          '', '',
+        ].join('\n')))
+      },
+      cancel() { cancelled = true },
+    })
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: (async () => new Response(body, { status: 200 })) as typeof fetch,
+      requestTimeoutMs: 5_000,
+      streamIdleTimeoutMs: 5_000,
+    })
+    const iterator = transport.stream(request())[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toEqual({
+      value: { type: 'block-start', index: 0, blockType: 'text' },
+      done: false,
+    })
+    await iterator.return?.()
+    expect(cancelled).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('rejects non-loopback plaintext credential endpoints', () => {
+    for (const endpoint of [
+      'http://example.com/backend-api/codex/responses',
+      'http://127.attacker.example/backend-api/codex/responses',
+      'https://attacker.example/backend-api/codex/responses',
+    ]) {
+      expect(() => new NativeCodexHttpTransport({
+        endpoint,
+        resolveCredential: async () => CREDENTIAL,
+      })).toThrowError(expect.objectContaining({ code: 'INVALID_ARGS' }))
+    }
+  })
+  it('captures sticky turn state from HTTP response headers', async () => {
+    const capture = vi.fn()
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: (async () => new Response(SUCCESS_SSE, {
+        status: 200,
+        headers: {
+          'content-type': 'text/event-stream',
+          'x-cOdEx-TuRn-StAtE': 'header-sticky',
+        },
+      })) as typeof fetch,
+    })
+    await collect(transport.stream(request(), { captureTurnState: capture }))
+    expect(capture).toHaveBeenCalledWith('header-sticky')
+  })
+
+  it('captures response.metadata turn state for a safe HTTP retry', async () => {
+    const seenHeaders: Headers[] = []
+    const capture = vi.fn()
+    let attempt = 0
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      maxTransientRetries: 1,
+      initialRetryDelayMs: 1,
+      sleep: async () => {},
+      fetch: (async (_input, init) => {
+        seenHeaders.push(new Headers(init?.headers))
+        attempt += 1
+        if (attempt === 1) {
+          return successResponse([
+            'data: {"type":"response.metadata","headers":{"X-Codex-Turn-State":["http-sticky"]}}',
+            '', '',
+          ].join('\n'))
+        }
+        return successResponse()
+      }) as typeof fetch,
+    })
+    await collect(transport.stream(request(), { captureTurnState: capture }))
+    expect(capture).toHaveBeenCalledWith('http-sticky')
+    expect(seenHeaders).toHaveLength(2)
+    expect(seenHeaders[0]?.get('x-codex-turn-state')).toBeNull()
+    expect(seenHeaders[1]?.get('x-codex-turn-state')).toBe('http-sticky')
+  })
+
   it('posts the exact stable routed Standard request through a loopback server', async () => {
     let captured: { method?: string; url?: string; headers: IncomingMessage['headers']; body: string } | undefined
     const server = await loopback(async (req, res) => {

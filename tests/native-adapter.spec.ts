@@ -373,7 +373,9 @@ describe('NativeCodexAdapter catalog boundary', () => {
       ].join('\n'), { status: 200 })
     })
     vi.stubGlobal('fetch', fetchMock)
-    const authFiber = await ctx.plugin(OpenAICodexAuth, { dshHome: home, nativeAdapter: true })
+    const authFiber = await ctx.plugin(OpenAICodexAuth, {
+      dshHome: home, nativeAdapter: true, nativeWebSocket: false,
+    })
     try {
       await vi.waitFor(() => {
         expect(ctx.llm.listProviders()).toContainEqual({

@@ -355,6 +355,23 @@ describe('SSE framing and stream translation', () => {
     expect(activity.mock.calls.length).toBeGreaterThanOrEqual(4)
   })
 
+  it('bounds aggregate SSE bytes and event count', async () => {
+    await expect(collect(streamResponses(bytes([
+      `: ${'a'.repeat(60)}${LF}`,
+      `: ${'b'.repeat(60)}${LF}`,
+    ]), {
+      maxEventBytes: 80,
+      maxResponseBytes: 100,
+    }))).rejects.toMatchObject({ code: 'RESPONSE_TOO_LARGE' })
+
+    const malformed = `data: {}${LF}${LF}`
+    await expect(collect(streamResponses(bytes([
+      malformed, malformed, malformed,
+    ]), {
+      maxResponseEvents: 2,
+    }))).rejects.toMatchObject({ code: 'RESPONSE_TOO_LARGE' })
+  })
+
   it('fails fixedly on oversize events and cancellation', async () => {
     await expect(collect(streamResponses(bytes([`data: 1234567890${LF}${LF}`]), {
       maxEventBytes: 8,

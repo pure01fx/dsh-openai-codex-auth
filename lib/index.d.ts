@@ -15,6 +15,7 @@ export interface Config {
     path?: string;
     dshHome?: string;
     nativeAdapter?: boolean;
+    nativeWebSocket?: boolean;
 }
 interface UsageWindow {
     usedPercent: number;

@@ -6,6 +6,7 @@ export interface SseEvent {
 export interface ParseSseOptions {
     signal?: AbortSignal;
     onActivity?: () => void;
+    onBytes?: (bytes: number) => void;
     maxEventBytes?: number;
 }
 /** Decode a byte stream into bounded SSE frames. */

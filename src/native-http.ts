@@ -14,9 +14,12 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { nativeCodexAuthorityHash, type NativeCodexCredential } from './catalog.js'
+import { nativeCodexEndpoint } from './endpoint.js'
 import type { NativeCodexTransportMode } from './native-adapter.js'
 import {
+  boundedCodexTurnState,
   codexRequestBody,
+  codexResponseTurnState,
   streamResponses,
   type ResolvedContentPart,
   type ResolvedMessage,
@@ -367,6 +370,15 @@ function retryable(error: LlmError): boolean {
   return ['TRANSPORT', 'SERVER', 'TIMEOUT', 'STREAM_CLOSED'].includes(error.code)
 }
 
+export interface NativeCodexPreparedRequest {
+  generation: GenerateOptions
+  mode: NativeCodexTransportMode
+  request: Record<string, unknown>
+  body: string
+  routingId: string
+  routingHint: string
+}
+
 /** HTTP Responses transport. It never retains a credential outside one attempt. */
 export class NativeCodexHttpTransport {
   private readonly fetchImpl: typeof fetch
@@ -380,7 +392,7 @@ export class NativeCodexHttpTransport {
 
   constructor(private readonly options: NativeCodexHttpOptions) {
     this.fetchImpl = options.fetch ?? fetch
-    this.endpoint = options.endpoint ?? CODEX_RESPONSES_URL
+    this.endpoint = nativeCodexEndpoint(options.endpoint ?? CODEX_RESPONSES_URL).toString()
     this.requestTimeoutMs = safePositiveInteger(
       options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS, 'request timeout',
     )
@@ -412,9 +424,11 @@ export class NativeCodexHttpTransport {
     await (this.options.sleep ?? sleep)(delay, signal)
   }
 
-  async *stream(
+  endpointUrl(): string { return this.endpoint }
+
+  async prepare(
     generation: GenerateOptions, mode: NativeCodexTransportMode = {},
-  ): AsyncIterable<StreamChunk> {
+  ): Promise<NativeCodexPreparedRequest> {
     throwIfAborted(generation.signal)
     if (generation.model.length === 0 || generation.model.length > 256
       || /[\r\n\0;]/u.test(generation.model)) {
@@ -437,9 +451,11 @@ export class NativeCodexHttpTransport {
           ...generation,
           sessionId: stablePromptCacheKey(sessionId) as NonNullable<GenerateOptions['sessionId']>,
         }
+    let request: Record<string, unknown>
     let body: string
     try {
-      body = JSON.stringify(codexRequestBody(wireOptions, messages, mode))
+      request = codexRequestBody(wireOptions, messages, mode)
+      body = JSON.stringify(request)
     } catch (error) {
       if (error instanceof LlmError) throw error
       throw fixedFailure('native Codex request could not be encoded', 'INVALID_ARGS', { cause: error })
@@ -447,7 +463,20 @@ export class NativeCodexHttpTransport {
     if (Buffer.byteLength(body) > this.maxBodyBytes) {
       throw fixedFailure('native Codex request exceeded the size limit', 'REQUEST_TOO_LARGE')
     }
+    return { generation, mode, request, body, routingId, routingHint }
+  }
 
+  async *stream(
+    generation: GenerateOptions, mode: NativeCodexTransportMode = {},
+  ): AsyncIterable<StreamChunk> {
+    const prepared = await this.prepare(generation, mode)
+    const { body, routingId, routingHint } = prepared
+    let activeTurnState = mode.turnState
+    if (activeTurnState !== undefined
+      && (activeTurnState.length === 0 || Buffer.byteLength(activeTurnState) > 4096
+        || /[\r\n\0]/u.test(activeTurnState))) {
+      throw fixedFailure('native Codex turn routing state is invalid', 'INVALID_ARGS')
+    }
     let transientRetries = 0
     let recovered = false
     while (true) {
@@ -478,6 +507,7 @@ export class NativeCodexHttpTransport {
             'thread-id': routingId,
             'x-client-request-id': routingId,
             'x-codex-routing-hint': routingHint,
+            ...(activeTurnState === undefined ? {} : { 'x-codex-turn-state': activeTurnState }),
             ...(generation.purpose === 'compaction' ? { 'x-openai-subagent': 'compact' } : {}),
             accept: 'text/event-stream',
             'content-type': 'application/json',
@@ -496,6 +526,13 @@ export class NativeCodexHttpTransport {
         throw failure
       }
 
+      if (activeTurnState === undefined) {
+        const headerTurnState = boundedCodexTurnState(response.headers.get('x-codex-turn-state'))
+        if (headerTurnState !== undefined) {
+          activeTurnState = headerTurnState
+          mode.captureTurnState?.(headerTurnState)
+        }
+      }
       if (response.status === 401 && !recovered && this.options.recoverCredential !== undefined) {
         try {
           recovered = true
@@ -544,6 +581,13 @@ export class NativeCodexHttpTransport {
           onMalformedEvent: () => {
             this.options.warn?.('native Codex ignored a malformed SSE event')
           },
+          onEvent: (event) => {
+            const nextTurnState = codexResponseTurnState(event)
+            if (activeTurnState === undefined && nextTurnState !== undefined) {
+              activeTurnState = nextTurnState
+              mode.captureTurnState?.(nextTurnState)
+            }
+          },
           replayContext: {
             provider: generation.provider,
             model: mode.publicModel ?? generation.model,
@@ -554,7 +598,6 @@ export class NativeCodexHttpTransport {
             && ['stop', 'tool-calls', 'max-tokens'].includes(chunk.reason.kind)) completed = true
           yield chunk
         }
-        watchdog.stop()
         if (completed && this.options.onCompleted !== undefined) {
           try { this.options.onCompleted() } catch {
             this.options.warn?.('native Codex usage refresh could not be scheduled')
@@ -563,12 +606,13 @@ export class NativeCodexHttpTransport {
         return
       } catch (error) {
         const failure = mappedFailure(error, watchdog, generation.signal)
-        watchdog.stop()
         if (!emitted && retryable(failure) && transientRetries < this.maxRetries) {
           await this.wait(transientRetries++, failure, generation.signal)
           continue
         }
         throw failure
+      } finally {
+        watchdog.stop()
       }
     }
   }

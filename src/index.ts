@@ -14,7 +14,8 @@ import { join, resolve } from 'node:path'
 import { INVALID_CREDENTIAL_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import { NATIVE_CODEX_PROVIDER, NativeCodexAdapter } from './native-adapter.js'
 import { NativeCodexCatalog, type NativeCodexCredential } from './catalog.js'
-import { NativeCodexHttpTransport } from './native-http.js'
+import { NativeCodexHttpTransport, type NativeCodexHttpOptions } from './native-http.js'
+import { NativeCodexWebSocketTransport } from './native-websocket.js'
 
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 const AUTH_BASE_URL = 'https://auth.openai.com'
@@ -48,7 +49,12 @@ export interface OpenAICodexCredential {
 }
 
 /** Plugin configuration. */
-export interface Config { path?: string; dshHome?: string; nativeAdapter?: boolean }
+export interface Config {
+  path?: string
+  dshHome?: string
+  nativeAdapter?: boolean
+  nativeWebSocket?: boolean
+}
 
 interface Document { version: 1; credential: OpenAICodexCredential }
 
@@ -678,6 +684,7 @@ export class OpenAICodexAuth extends Service {
     path: z.string(),
     dshHome: z.string(),
     nativeAdapter: z.boolean().default(false),
+    nativeWebSocket: z.boolean().default(true),
   })
   static inject = ['credentials', 'webServer', 'webRuntime']
   private readonly filename: string
@@ -700,7 +707,7 @@ export class OpenAICodexAuth extends Service {
         resolveCredential: signal => this.resolveNativeCredential(signal),
         warn: message => { ctx.logger.warn(message) },
       })
-      const transport = new NativeCodexHttpTransport({
+      const transportOptions: NativeCodexHttpOptions = {
         resolveCredential: signal => this.resolveNativeCredential(signal),
         recoverCredential: (previous, signal) => this.recoverNativeCredential(previous, signal),
         readImage: async (attachment, signal) => {
@@ -716,7 +723,13 @@ export class OpenAICodexAuth extends Service {
           return store.readImage(attachment, signal)
         },
         warn: message => { ctx.logger.warn(message) },
-      })
+      }
+      const transport = config.nativeWebSocket === false
+        ? new NativeCodexHttpTransport(transportOptions)
+        : new NativeCodexWebSocketTransport(transportOptions)
+      if (transport instanceof NativeCodexWebSocketTransport) {
+        ctx.effect(() => () => { transport.dispose() }, 'openai-codex-auth: dispose native WebSockets')
+      }
       ctx.inject(['llm'], (llmCtx) => {
         llmCtx.llm.registerAdapter(
           [NATIVE_CODEX_PROVIDER],

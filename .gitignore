@@ -1,4 +1,5 @@
 node_modules/
+.pnpm-store/
 dist/
 coverage/
 *.tgz
@@ -12,10 +13,18 @@ lib/*
 !lib/index.d.ts
 !lib/catalog.js
 !lib/catalog.d.ts
+!lib/endpoint.js
+!lib/endpoint.d.ts
 !lib/native-adapter.js
 !lib/native-adapter.d.ts
 !lib/native-http.js
 !lib/native-http.d.ts
+!lib/native-websocket.js
+!lib/native-websocket.d.ts
+!lib/native-websocket-session.js
+!lib/native-websocket-session.d.ts
+!lib/native-websocket-socket.js
+!lib/native-websocket-socket.d.ts
 !lib/responses.js
 !lib/responses.d.ts
 !lib/replay.js

@@ -173,6 +173,22 @@ $DSH_HOME/openai-codex-auth.json
 
 `path` 的优先级高于 `dshHome`。
 
+### 实验性原生 Codex transport
+
+设置 `nativeAdapter: true` 会额外注册 `openai-codex-native`；现有 `openai-codex` 仍由原 provider 管理，不会被接管。原生 route 默认使用 Responses WebSocket v2，在会话首个请求上执行 `generate: false` prewarm，并仅在请求历史严格延伸时发送 `previous_response_id` 与增量后缀。连接重建会清除增量链；安全重试耗尽或握手返回 HTTP 426 后，该 DSH 会话会确定性地回退到 HTTP/SSE。任何 DSH chunk 已输出后都不会跨 transport 重放。
+
+`<base>-fast` 只是公开选择别名：wire model 仍是 `<base>`，请求携带 `service_tier: priority`。若账号目录不声明 priority 能力，或请求前账号 authority 已改变，Fast 会直接失败，不会静默降级。
+
+```yaml
+- insert:
+    - id: openai-codex-auth
+      name: '@pure01fx/dsh-openai-codex-auth'
+      config:
+        nativeAdapter: true
+        nativeWebSocket: true # 默认值；设为 false 可强制实验 route 使用 HTTP/SSE
+```
+
+
 ## 凭据处理边界
 
 以下内容说明插件如何处理本地凭据与管理接口，不代表或承诺任何 OpenAI 账号风控结果。

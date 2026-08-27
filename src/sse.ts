@@ -11,6 +11,7 @@ export interface SseEvent {
 export interface ParseSseOptions {
   signal?: AbortSignal
   onActivity?: () => void
+  onBytes?: (bytes: number) => void
   maxEventBytes?: number
 }
 
@@ -51,6 +52,7 @@ export async function* parseSse(
       if (cancelled || Boolean(options.signal?.aborted)) throw aborted()
       if (done) return
       options.onActivity?.()
+      options.onBytes?.(value.byteLength)
       pending += decoder.decode(value, { stream: true })
       if (Buffer.byteLength(pending) > limit && !pending.includes('\n')) throw tooLarge()
       let newline = pending.indexOf('\n')

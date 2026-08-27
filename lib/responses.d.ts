@@ -112,8 +112,15 @@ export declare class ResponsesStreamTranslator {
 }
 export interface StreamResponsesOptions extends ParseSseOptions {
     onMalformedEvent?: () => void;
+    onEvent?: (event: ResponsesStreamEvent) => void;
     replayContext?: ResponsesReplayContext;
+    maxResponseBytes?: number;
+    maxResponseEvents?: number;
 }
+/** Validate one opaque sticky turn token before retaining or forwarding it. */
+export declare function boundedCodexTurnState(value: unknown): string | undefined;
+/** Extract the bounded sticky turn token from provider metadata/event shapes. */
+export declare function codexResponseTurnState(event: ResponsesStreamEvent): string | undefined;
 /** Consume framed SSE JSON into DSH chunks. */
 export declare function streamResponses(stream: ReadableStream<Uint8Array>, options?: StreamResponsesOptions): AsyncGenerator<StreamChunk>;
 export {};
