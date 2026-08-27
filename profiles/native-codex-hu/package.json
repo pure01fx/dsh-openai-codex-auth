@@ -1,0 +1,24 @@
+{
+  "name": "dsh-profile-native-codex-hu",
+  "private": true,
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-credentials": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@pure01fx/dsh-collection-hu": "0.1.1",
+    "@pure01fx/dsh-openai-codex-auth": "0.6.0",
+    "dsh-better-sidebar": "0.16.1"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "@pure01fx/dsh-collection-hu",
+        "dsh-better-sidebar",
+        "@pure01fx/dsh-openai-codex-auth"
+      ]
+    }
+  }
+}

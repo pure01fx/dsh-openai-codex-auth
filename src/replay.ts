@@ -119,6 +119,11 @@ function parseDescriptor(value: unknown): NativeCodexReplayDescriptor {
   throw failure('native Codex replay descriptor type is unsupported')
 }
 
+/** True only for state emitted by this package; foreign adapters degrade to visible history. */
+export function hasNativeCodexReplayKind(value: unknown): boolean {
+  return object(value)?.kind === NATIVE_CODEX_REPLAY_KIND
+}
+
 function parseState(value: unknown): NativeCodexReplayState {
   safeStateSize(value, 'INVALID_REPLAY_STATE')
   const row = object(value)

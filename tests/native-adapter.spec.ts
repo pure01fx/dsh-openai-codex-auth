@@ -12,11 +12,10 @@ import { join } from 'node:path'
 import OpenAICodexAuth from '../src/index.ts'
 import type { NativeCodexModel } from '../src/catalog.ts'
 import {
+  CODEX_PROVIDER,
   NATIVE_CODEX_PROVIDER,
   NativeCodexAdapter,
 } from '../src/native-adapter.ts'
-
-const PI_CODEX_PROVIDER = 'openai-codex'
 
 class RegistrationCredentials {
   value: string | undefined
@@ -90,9 +89,13 @@ describe('NativeCodexAdapter catalog boundary', () => {
   it('returns valid fixed-route metadata and advisory exact model identity', async () => {
     const adapter = new NativeCodexAdapter()
 
+    expect(adapter.providerInfo(CODEX_PROVIDER)).toEqual({
+      id: CODEX_PROVIDER,
+      name: 'OpenAI Codex',
+    })
     expect(adapter.providerInfo(NATIVE_CODEX_PROVIDER)).toEqual({
       id: NATIVE_CODEX_PROVIDER,
-      name: 'OpenAI Codex (Native, Experimental)',
+      name: 'OpenAI Codex (Native Compatibility)',
     })
     expect(await adapter.listModels(NATIVE_CODEX_PROVIDER)).toEqual([])
     expect(await adapter.resolveModel(NATIVE_CODEX_PROVIDER, 'vendor/model:exact')).toEqual({
@@ -100,7 +103,7 @@ describe('NativeCodexAdapter catalog boundary', () => {
       id: 'vendor/model:exact',
       name: 'vendor/model:exact',
     })
-    expect(() => adapter.providerInfo(PI_CODEX_PROVIDER)).toThrowError(
+    expect(() => adapter.providerInfo('openai-codex-foreign')).toThrowError(
       expect.objectContaining({ code: 'NO_ADAPTER' }),
     )
   })
@@ -378,27 +381,27 @@ describe('NativeCodexAdapter catalog boundary', () => {
     })
     try {
       await vi.waitFor(() => {
-        expect(ctx.llm.listProviders()).toContainEqual({
-          id: NATIVE_CODEX_PROVIDER,
-          name: 'OpenAI Codex (Native, Experimental)',
-        })
+        expect(ctx.llm.listProviders()).toEqual([
+          { id: CODEX_PROVIDER, name: 'OpenAI Codex' },
+          { id: NATIVE_CODEX_PROVIDER, name: 'OpenAI Codex (Native Compatibility)' },
+        ])
       })
-      await expect(ctx.llm.listModels(NATIVE_CODEX_PROVIDER)).resolves.toEqual([
+      await expect(ctx.llm.listModels(CODEX_PROVIDER)).resolves.toEqual([
         {
-          provider: NATIVE_CODEX_PROVIDER,
+          provider: CODEX_PROVIDER,
           id: 'catalog/model',
           name: 'Catalog Model',
           inputModalities: ['text', 'image'],
         },
         {
-          provider: NATIVE_CODEX_PROVIDER,
+          provider: CODEX_PROVIDER,
           id: 'catalog/model-fast',
           name: 'Catalog Model (Fast)',
           inputModalities: ['text', 'image'],
         },
       ])
       await expect(collect(ctx.llm.stream({
-        ...request(), model: 'catalog/model-fast',
+        ...request(CODEX_PROVIDER), model: 'catalog/model-fast',
       }))).resolves.toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'ok' },
@@ -410,7 +413,7 @@ describe('NativeCodexAdapter catalog boundary', () => {
           replayState: {
             kind: 'openai-codex-native.responses-replay',
             version: 1,
-            provider: NATIVE_CODEX_PROVIDER,
+            provider: CODEX_PROVIDER,
             model: 'catalog/model-fast',
             items: [{ type: 'message', blocks: [0] }],
           },
@@ -427,58 +430,50 @@ describe('NativeCodexAdapter catalog boundary', () => {
     await vi.waitFor(() => { expect(ctx.llm.listProviders()).toEqual([]) })
   })
 
-  it('keeps native and existing pi-ai route names registered together', () => {
-    const disposeExisting = ctx.llm.registerAdapter(
-      [PI_CODEX_PROVIDER],
-      new ExistingCodexAdapter(),
-    )
+  it('registers and disposes production plus compatibility routes atomically', async () => {
     const disposeNative = ctx.llm.registerAdapter(
-      [NATIVE_CODEX_PROVIDER],
+      [CODEX_PROVIDER, NATIVE_CODEX_PROVIDER],
       new NativeCodexAdapter(),
     )
-
     expect(ctx.llm.listProviders()).toEqual([
-      { id: PI_CODEX_PROVIDER, name: 'Existing pi-ai Codex route' },
-      { id: NATIVE_CODEX_PROVIDER, name: 'OpenAI Codex (Native, Experimental)' },
+      { id: CODEX_PROVIDER, name: 'OpenAI Codex' },
+      { id: NATIVE_CODEX_PROVIDER, name: 'OpenAI Codex (Native Compatibility)' },
     ])
 
     disposeNative()
-    disposeExisting()
+    await vi.waitFor(() => { expect(ctx.llm.listProviders()).toEqual([]) })
   })
 
-  it('rejects taking the existing openai-codex route atomically', () => {
+  it('rejects a production-route collision without partially claiming compatibility', () => {
     const disposeExisting = ctx.llm.registerAdapter(
-      [PI_CODEX_PROVIDER],
+      [CODEX_PROVIDER],
       new ExistingCodexAdapter(),
     )
 
     expect(() => ctx.llm.registerAdapter(
-      [PI_CODEX_PROVIDER],
+      [CODEX_PROVIDER, NATIVE_CODEX_PROVIDER],
       new NativeCodexAdapter(),
     )).toThrowError(expect.objectContaining({ code: 'DUPLICATE_ADAPTER' }))
     expect(ctx.llm.listProviders()).toEqual([
-      { id: PI_CODEX_PROVIDER, name: 'Existing pi-ai Codex route' },
+      { id: CODEX_PROVIDER, name: 'Existing pi-ai Codex route' },
     ])
 
     disposeExisting()
   })
 
-  it('disposes the native registration without disturbing the existing route', async () => {
+  it('rejects a compatibility-route collision without partially claiming production', () => {
     const disposeExisting = ctx.llm.registerAdapter(
-      [PI_CODEX_PROVIDER],
+      [NATIVE_CODEX_PROVIDER],
       new ExistingCodexAdapter(),
     )
-    const disposeNative = ctx.llm.registerAdapter(
-      [NATIVE_CODEX_PROVIDER],
-      new NativeCodexAdapter(),
-    )
 
-    disposeNative()
-    await vi.waitFor(() => {
-      expect(ctx.llm.listProviders()).toEqual([
-        { id: PI_CODEX_PROVIDER, name: 'Existing pi-ai Codex route' },
-      ])
-    })
+    expect(() => ctx.llm.registerAdapter(
+      [CODEX_PROVIDER, NATIVE_CODEX_PROVIDER],
+      new NativeCodexAdapter(),
+    )).toThrowError(expect.objectContaining({ code: 'DUPLICATE_ADAPTER' }))
+    expect(ctx.llm.listProviders()).toEqual([
+      { id: NATIVE_CODEX_PROVIDER, name: 'Existing pi-ai Codex route' },
+    ])
 
     disposeExisting()
   })
@@ -495,16 +490,19 @@ describe('NativeCodexAdapter catalog boundary', () => {
       },
     }
     const adapter = new NativeCodexAdapter(undefined, transport)
-    const disposeNative = ctx.llm.registerAdapter([NATIVE_CODEX_PROVIDER], adapter)
+    const disposeNative = ctx.llm.registerAdapter(
+      [CODEX_PROVIDER, NATIVE_CODEX_PROVIDER],
+      adapter,
+    )
 
-    expect(await collect(ctx.llm.stream(request()))).toEqual([
+    expect(await collect(ctx.llm.stream(request(CODEX_PROVIDER)))).toEqual([
       { type: 'block-start', index: 0, blockType: 'text' },
       { type: 'text-delta', index: 0, text: 'ok' },
       { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } },
       { type: 'finish', reason: { kind: 'stop' } },
     ])
     expect(seen).toHaveLength(1)
-    expect(adapter.providerRetryPolicy(NATIVE_CODEX_PROVIDER)).toMatchObject({
+    expect(adapter.providerRetryPolicy(CODEX_PROVIDER)).toMatchObject({
       mode: 'normal',
       maxRetries: 0,
       retryableCodes: [],

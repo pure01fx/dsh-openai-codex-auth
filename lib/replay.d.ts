@@ -30,6 +30,8 @@ export interface NativeCodexReplaySource {
 }
 /** Preserve only server item IDs that Codex itself would replay. */
 export declare function replayableItemId(value: string | undefined): string | undefined;
+/** True only for state emitted by this package; foreign adapters degrade to visible history. */
+export declare function hasNativeCodexReplayKind(value: unknown): boolean;
 /** Attempt-local bounded accumulator; no ciphertext can grow unchecked before completion. */
 export declare class NativeCodexReplayCapture {
     private readonly provider;

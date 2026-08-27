@@ -1,7 +1,9 @@
-/** Experimental native Codex adapter with live catalog and HTTP transport delegation. */
+/** Native Codex adapter with live catalog and HTTP/WebSocket transport delegation. */
 import { LlmAdapter, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type ResolvedRetryPolicy, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { NativeCodexModelCatalog } from './catalog.js';
-/** Provider route reserved for the package-owned native Codex adapter. */
+/** Production provider route owned by the package native Codex adapter after M6 cutover. */
+export declare const CODEX_PROVIDER = "openai-codex";
+/** Compatibility route retained for sessions created during the native preview. */
 export declare const NATIVE_CODEX_PROVIDER = "openai-codex-native";
 export declare const CODEX_FAST_ALIAS_SUFFIX = "-fast";
 export declare const CODEX_FAST_SERVICE_TIER = "priority";

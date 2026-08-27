@@ -1,4 +1,4 @@
-/** Experimental native Codex adapter with live catalog and HTTP transport delegation. */
+/** Native Codex adapter with live catalog and HTTP/WebSocket transport delegation. */
 import {
   LlmAdapter,
   LlmError,
@@ -16,8 +16,11 @@ import type {
   NativeCodexModelCatalog,
 } from './catalog.js'
 
-/** Provider route reserved for the package-owned native Codex adapter. */
+/** Production provider route owned by the package native Codex adapter after M6 cutover. */
+export const CODEX_PROVIDER = 'openai-codex'
+/** Compatibility route retained for sessions created during the native preview. */
 export const NATIVE_CODEX_PROVIDER = 'openai-codex-native'
+const OWNED_CODEX_PROVIDERS = new Set([CODEX_PROVIDER, NATIVE_CODEX_PROVIDER])
 export const CODEX_FAST_ALIAS_SUFFIX = '-fast'
 export const CODEX_FAST_SERVICE_TIER = 'priority'
 
@@ -137,7 +140,7 @@ export class NativeCodexAdapter extends LlmAdapter {
   }
 
   private assertProvider(provider: string): void {
-    if (provider !== NATIVE_CODEX_PROVIDER) {
+    if (!OWNED_CODEX_PROVIDERS.has(provider)) {
       throw new LlmError(
         `native Codex adapter does not own provider "${provider}"`,
         'NO_ADAPTER',
@@ -153,7 +156,10 @@ export class NativeCodexAdapter extends LlmAdapter {
 
   providerInfo(provider: string): LlmProviderInfo {
     this.assertProvider(provider)
-    return { id: provider, name: 'OpenAI Codex (Native, Experimental)' }
+    return {
+      id: provider,
+      name: provider === CODEX_PROVIDER ? 'OpenAI Codex' : 'OpenAI Codex (Native Compatibility)',
+    }
   }
 
   providerRetryPolicy(provider: string): ResolvedRetryPolicy {

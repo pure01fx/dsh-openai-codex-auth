@@ -25,6 +25,7 @@ import {
   type ResolvedMessage,
   type ResolvedToolResultPart,
 } from './responses.js'
+import { hasNativeCodexReplayKind } from './replay.js'
 
 export const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
@@ -239,7 +240,7 @@ async function resolveMessages(
     }
     const source = message.source
     const replaySource = message.role === 'assistant' && source?.kind === 'model'
-      && source.replayState !== undefined
+      && source.replayState !== undefined && hasNativeCodexReplayKind(source.replayState)
       ? { provider: source.provider, model: source.model, replayState: source.replayState }
       : undefined
     messages.push({

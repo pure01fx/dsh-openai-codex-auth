@@ -12,7 +12,12 @@ import { createHash, randomBytes } from 'node:crypto'
 import { readFile, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { INVALID_CREDENTIAL_CODE, LlmError } from '@deepseek-ai/dsh-llm'
-import { NATIVE_CODEX_PROVIDER, NativeCodexAdapter } from './native-adapter.js'
+import {
+  CODEX_PROVIDER,
+  NATIVE_CODEX_PROVIDER,
+  NativeCodexAdapter,
+} from './native-adapter.js'
+export { CODEX_PROVIDER, NATIVE_CODEX_PROVIDER } from './native-adapter.js'
 import { NativeCodexCatalog, type NativeCodexCredential } from './catalog.js'
 import { NativeCodexHttpTransport, type NativeCodexHttpOptions } from './native-http.js'
 import { NativeCodexWebSocketTransport } from './native-websocket.js'
@@ -53,6 +58,7 @@ export interface Config {
   path?: string
   dshHome?: string
   nativeAdapter?: boolean
+  nativeCompatibilityRoute?: boolean
   nativeWebSocket?: boolean
 }
 
@@ -684,6 +690,7 @@ export class OpenAICodexAuth extends Service {
     path: z.string(),
     dshHome: z.string(),
     nativeAdapter: z.boolean().default(false),
+    nativeCompatibilityRoute: z.boolean().default(true),
     nativeWebSocket: z.boolean().default(true),
   })
   static inject = ['credentials', 'webServer', 'webRuntime']
@@ -732,7 +739,10 @@ export class OpenAICodexAuth extends Service {
       }
       ctx.inject(['llm'], (llmCtx) => {
         llmCtx.llm.registerAdapter(
-          [NATIVE_CODEX_PROVIDER],
+          [
+            CODEX_PROVIDER,
+            ...(config.nativeCompatibilityRoute === false ? [] : [NATIVE_CODEX_PROVIDER]),
+          ],
           new NativeCodexAdapter(catalog, transport),
         )
       })
@@ -748,7 +758,7 @@ export class OpenAICodexAuth extends Service {
     }, 'openai-codex-auth: bootstrap credential')
     ctx.on('agent/request', async ({ agent, turn }, next) => {
       const request = await next()
-      if (request.provider === 'openai-codex' || request.provider === NATIVE_CODEX_PROVIDER) {
+      if (request.provider === CODEX_PROVIDER || request.provider === NATIVE_CODEX_PROVIDER) {
         this.markCodexTurn(String(agent.id), turn)
       }
       return request

@@ -3,6 +3,7 @@ import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { type IncomingMessage } from 'node:http';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
+export { CODEX_PROVIDER, NATIVE_CODEX_PROVIDER } from './native-adapter.js';
 /** Persisted OAuth credential. */
 export interface OpenAICodexCredential {
     access: string;
@@ -15,6 +16,7 @@ export interface Config {
     path?: string;
     dshHome?: string;
     nativeAdapter?: boolean;
+    nativeCompatibilityRoute?: boolean;
     nativeWebSocket?: boolean;
 }
 interface UsageWindow {

@@ -90,6 +90,43 @@ describe('NativeCodexHttpTransport', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('degrades serialized rc6 pi-ai replay to durable visible history on cutover', async () => {
+    let capturedBody: Record<string, unknown> | undefined
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: (async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return successResponse()
+      }) as typeof fetch,
+    })
+    await collect(transport.stream(request({
+      provider: 'openai-codex',
+      messages: [{
+        role: 'assistant',
+        content: [{ type: 'text', text: 'durable answer' }],
+        source: {
+          kind: 'model',
+          provider: 'openai-codex',
+          model: 'gpt-test',
+          replayState: {
+            kind: 'pi-ai',
+            version: 1,
+            api: 'openai-responses',
+            provider: 'openai-codex',
+            model: 'gpt-test',
+            stopReason: 'stop',
+            blocks: [{ type: 'text' }],
+          },
+        },
+      }] as unknown as GenerateOptions['messages'],
+    })))
+    expect(capturedBody?.input).toEqual([{
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'durable answer' }],
+    }])
+  })
+
   it('rejects non-loopback plaintext credential endpoints', () => {
     for (const endpoint of [
       'http://example.com/backend-api/codex/responses',

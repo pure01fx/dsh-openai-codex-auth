@@ -1,0 +1,12 @@
+packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+minimumReleaseAgeExclude:
+  - '@pure01fx/dsh-collection-hu@0.1.1'
+  - '@pure01fx/dsh-openai-codex-auth@0.6.0'
+  - '@pure01fx/dsh-runbook-hu@0.1.0'
+  - '@pure01fx/dsh-subagent-tiers-hu@0.1.0'
+allowBuilds:
+  node-pty: true

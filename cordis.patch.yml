@@ -1,11 +1,8 @@
-- id: llm-pi-ai
-  config:
-    providers:
-      openai-codex:
-        apiKeyEnv: DSH_OPENAI_CODEX_TOKEN
-
+# The native adapter claims production plus compatibility routes atomically. A profile
+# that still gives openai-codex to pi-ai must release that route before activation.
 - insert:
     - id: openai-codex-auth
       name: '@pure01fx/dsh-openai-codex-auth'
       config:
         nativeAdapter: true
+        nativeCompatibilityRoute: true

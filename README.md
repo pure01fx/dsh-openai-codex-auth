@@ -173,9 +173,24 @@ $DSH_HOME/openai-codex-auth.json
 
 `path` 的优先级高于 `dshHome`。
 
-### 实验性原生 Codex transport
+### 原生 Codex transport 与独立 Profile
 
-设置 `nativeAdapter: true` 会额外注册 `openai-codex-native`；现有 `openai-codex` 仍由原 provider 管理，不会被接管。原生 route 默认使用 Responses WebSocket v2，在会话首个请求上执行 `generate: false` prewarm，并仅在请求历史严格延伸时发送 `previous_response_id` 与增量后缀。连接重建会清除增量链；安全重试耗尽或握手返回 HTTP 426 后，该 DSH 会话会确定性地回退到 HTTP/SSE。任何 DSH chunk 已输出后都不会跨 transport 重放。
+从 0.6 开始，启用 `nativeAdapter` 后，本包会在一次原子注册中持有生产 route `openai-codex`，并默认保留 `openai-codex-native` 兼容 route。若任一 route 已被其他 adapter 持有，注册会整体失败，不会出现半切换。组合时必须先从 `llm-pi-ai` 移除 `openai-codex`；通用 bundle 不会清空未知的 pi-ai sibling providers，下面的固定版本 Profile 才会替换 Hu collection 0.1.1 中已知仅含 Codex 的完整 provider map。不要在仍由 pi-ai 持有该 route 的其他配置树中单独打开 native adapter。
+
+为保留现有 Hu Profile，包内提供 `profiles/native-codex-hu` 模板。它固定当前实际使用的 Hu collection 0.1.1 与 Sidebar 0.16.1，并将本包的 Host contracts 固定到 DSH rc.6；Sidebar 0.16.1 声明的是 rc.8 peers，这是从当前 Hu Profile 原样继承的兼容性风险，并非本包对它作出的 rc.6 支持声明。模板复用相同的 Web、preset 与 subagent 配置，只释放 collection 的已知 Codex pi-ai route、禁用较早挂载的 OAuth 插件实例，再把本包 bundle 放在最后完成 ownership transfer：
+
+```sh
+test ! -e "$DSH_HOME/profiles/native-codex-hu"
+cp -R node_modules/@pure01fx/dsh-openai-codex-auth/profiles/native-codex-hu \
+  "$DSH_HOME/profiles/native-codex-hu"
+dsh plugin --profile native-codex-hu install
+dsh --profile native-codex-hu --dump-config
+dsh --profile native-codex-hu
+```
+
+原 Hu Profile 始终保持不变，可用 `dsh --profile hu` 回到原组合；凭据、模型设置和 preset 无需删除。切换到 native 时，旧 pi-ai session 的 foreign replay 会降级为可见持久历史。反向切回 pi-ai 后，已产生 native replay 的进行中 session 不保证可续跑，应新建 session 或继续使用 native Profile；`openai-codex-native` 预览 session 也只在 native Profile 可用。确认不再需要预览 session 后，可设置 `nativeCompatibilityRoute: false` 隐藏兼容 route。
+
+原生 route 默认使用 Responses WebSocket v2，在会话首个请求上执行 `generate: false` prewarm，并仅在请求历史严格延伸时发送 `previous_response_id` 与增量后缀。连接重建会清除增量链；安全重试耗尽或握手返回 HTTP 426 后，该 DSH 会话会确定性地回退到 HTTP/SSE。任何 DSH chunk 已输出后都不会跨 transport 重放。
 
 `<base>-fast` 只是公开选择别名：wire model 仍是 `<base>`，请求携带 `service_tier: priority`。若账号目录不声明 priority 能力，或请求前账号 authority 已改变，Fast 会直接失败，不会静默降级。
 
@@ -185,7 +200,8 @@ $DSH_HOME/openai-codex-auth.json
       name: '@pure01fx/dsh-openai-codex-auth'
       config:
         nativeAdapter: true
-        nativeWebSocket: true # 默认值；设为 false 可强制实验 route 使用 HTTP/SSE
+        nativeCompatibilityRoute: true # 默认值
+        nativeWebSocket: true # 默认值；设为 false 可强制使用 HTTP/SSE
 ```
 
 
