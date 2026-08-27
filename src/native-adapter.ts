@@ -1,4 +1,4 @@
-/** Experimental native Codex adapter; HTTP transport arrives in M3. */
+/** Experimental native Codex adapter with live catalog and HTTP transport delegation. */
 import {
   LlmAdapter,
   LlmError,
@@ -8,6 +8,7 @@ import {
   type LlmProviderInfo,
   type LlmResolvedModelInfo,
   type ModelModality,
+  type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type {
@@ -80,9 +81,27 @@ function resolvedModel(provider: string, model: NativeCodexModel): LlmResolvedMo
   return info
 }
 
-/** Package-owned DSH adapter with live catalog metadata and an M3 transport boundary. */
+/** Request-scoped native Codex transport owned by this package. */
+export interface NativeCodexTransport {
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk>
+}
+
+/** Disable outer step replay: the native transport owns only safe pre-output retries. */
+const NATIVE_RETRY_POLICY: ResolvedRetryPolicy = Object.freeze({
+  mode: 'normal',
+  maxRetries: 0,
+  retryableCodes: Object.freeze([]),
+  initialDelayMs: 200,
+  maxDelayMs: 10_000,
+  jitterRatio: 0.1,
+})
+
+/** Package-owned DSH adapter with live catalog metadata and native transport delegation. */
 export class NativeCodexAdapter extends LlmAdapter {
-  constructor(private readonly catalog?: NativeCodexModelCatalog) {
+  constructor(
+    private readonly catalog?: NativeCodexModelCatalog,
+    private readonly transport?: NativeCodexTransport,
+  ) {
     super()
   }
 
@@ -104,6 +123,11 @@ export class NativeCodexAdapter extends LlmAdapter {
   providerInfo(provider: string): LlmProviderInfo {
     this.assertProvider(provider)
     return { id: provider, name: 'OpenAI Codex (Native, Experimental)' }
+  }
+
+  providerRetryPolicy(provider: string): ResolvedRetryPolicy {
+    this.assertProvider(provider)
+    return NATIVE_RETRY_POLICY
   }
 
   async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
@@ -133,9 +157,12 @@ export class NativeCodexAdapter extends LlmAdapter {
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.assertNotAborted(options.signal)
     this.assertProvider(options.provider)
-    throw new LlmError(
-      'native Codex transport is not implemented before M3',
-      'NATIVE_TRANSPORT_NOT_READY',
-    )
+    if (this.transport === undefined) {
+      throw new LlmError(
+        'native Codex transport is not configured',
+        'NATIVE_TRANSPORT_NOT_CONFIGURED',
+      )
+    }
+    yield* this.transport.stream(options)
   }
 }

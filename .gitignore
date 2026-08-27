@@ -14,3 +14,9 @@ lib/*
 !lib/catalog.d.ts
 !lib/native-adapter.js
 !lib/native-adapter.d.ts
+!lib/native-http.js
+!lib/native-http.d.ts
+!lib/responses.js
+!lib/responses.d.ts
+!lib/sse.js
+!lib/sse.d.ts

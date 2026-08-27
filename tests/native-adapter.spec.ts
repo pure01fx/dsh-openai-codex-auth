@@ -215,24 +215,37 @@ describe('NativeCodexAdapter catalog boundary', () => {
     dispose()
   })
 
-  it('registers the opt-in route and resolves its catalog through external authority', async () => {
+  it('registers the opt-in route and streams through external authority', async () => {
     const home = await mkdtemp(join(tmpdir(), 'openai-codex-native-registration-'))
     const credentials = new RegistrationCredentials()
     credentials.value = accessToken('acct_registration')
     ctx.provide('credentials', credentials as never)
     ctx.provide('webServer', new RegistrationWebServer() as never)
     ctx.provide('webRuntime', { lanAddresses: [], trustedHosts: [] })
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      models: [{
-        slug: 'catalog/model',
-        display_name: 'Catalog Model',
-        supported_reasoning_levels: [],
-        shell_type: 'shell_command',
-        visibility: 'list',
-        priority: 1,
-        supported_in_api: false,
-      }],
-    }), { status: 200 }))
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      if (String(input).includes('/models?')) {
+        return new Response(JSON.stringify({
+          models: [{
+            slug: 'catalog/model',
+            display_name: 'Catalog Model',
+            supported_reasoning_levels: [],
+            shell_type: 'shell_command',
+            visibility: 'list',
+            priority: 1,
+            supported_in_api: false,
+          }],
+        }), { status: 200 })
+      }
+      return new Response([
+        'data: {"type":"response.output_text.delta","item_id":"msg-integration","delta":"ok"}',
+        '',
+        'data: {"type":"response.output_item.done","item":{"type":"message","id":"msg-integration","content":[{"type":"output_text","text":"ok"}]}}',
+        '',
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+        '',
+        '',
+      ].join('\n'), { status: 200 })
+    })
     vi.stubGlobal('fetch', fetchMock)
     const authFiber = await ctx.plugin(OpenAICodexAuth, { dshHome: home, nativeAdapter: true })
     try {
@@ -248,7 +261,14 @@ describe('NativeCodexAdapter catalog boundary', () => {
         name: 'Catalog Model',
         inputModalities: ['text', 'image'],
       }])
-      expect(fetchMock).toHaveBeenCalledTimes(1)
+      await expect(collect(ctx.llm.stream(request()))).resolves.toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'ok' },
+        { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } },
+        { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ])
+      expect(fetchMock).toHaveBeenCalledTimes(2)
     } finally {
       await authFiber.dispose()
       await rm(home, { recursive: true, force: true })
@@ -312,33 +332,41 @@ describe('NativeCodexAdapter catalog boundary', () => {
     disposeExisting()
   })
 
-  it('normalizes skeleton dispatch into a terminal not-ready failure', async () => {
-    const disposeNative = ctx.llm.registerAdapter(
-      [NATIVE_CODEX_PROVIDER],
-      new NativeCodexAdapter(),
-    )
+  it('delegates through the real runtime with outer retries disabled', async () => {
+    const seen: GenerateOptions[] = []
+    const transport = {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        seen.push(options)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'ok' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }
+    const adapter = new NativeCodexAdapter(undefined, transport)
+    const disposeNative = ctx.llm.registerAdapter([NATIVE_CODEX_PROVIDER], adapter)
 
     expect(await collect(ctx.llm.stream(request()))).toEqual([
-      {
-        type: 'finish',
-        reason: {
-          kind: 'error',
-          failure: {
-            code: 'NATIVE_TRANSPORT_NOT_READY',
-            message: 'native Codex transport is not implemented before M3',
-          },
-        },
-      },
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'ok' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } },
+      { type: 'finish', reason: { kind: 'stop' } },
     ])
+    expect(seen).toHaveLength(1)
+    expect(adapter.providerRetryPolicy(NATIVE_CODEX_PROVIDER)).toMatchObject({
+      mode: 'normal',
+      maxRetries: 0,
+      retryableCodes: [],
+    })
 
     disposeNative()
   })
 
-  it('throws runtime LlmError instances for not-ready and pre-aborted calls', async () => {
+  it('throws runtime LlmError instances for unconfigured and pre-aborted calls', async () => {
     const adapter = new NativeCodexAdapter()
-    const notReady = await collect(adapter.stream(request())).catch((error: unknown) => error)
-    expect(notReady).toBeInstanceOf(LlmError)
-    expect(notReady).toMatchObject({ code: 'NATIVE_TRANSPORT_NOT_READY' })
+    const notConfigured = await collect(adapter.stream(request())).catch((error: unknown) => error)
+    expect(notConfigured).toBeInstanceOf(LlmError)
+    expect(notConfigured).toMatchObject({ code: 'NATIVE_TRANSPORT_NOT_CONFIGURED' })
 
     const abort = new AbortController()
     abort.abort()

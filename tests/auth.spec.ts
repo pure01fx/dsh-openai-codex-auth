@@ -576,6 +576,164 @@ describe('OpenAICodexAuth routes', () => {
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('forces one managed refresh and persists rotated native authority', async () => {
+    harness = await createHarness()
+    const old: OpenAICodexCredential = {
+      access: accessToken('acct_old'),
+      refresh: 'refresh-old',
+      expires: Date.now() + 3_600_000,
+      accountId: 'acct_old',
+    }
+    await writeCredential(harness.home, old)
+    harness.credentials.value = old.access
+    const nextAccess = accessToken('acct_new')
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      access_token: nextAccess,
+      refresh_token: 'refresh-new',
+      expires_in: 3600,
+      id_token: idToken('acct_new'),
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect((harness.root.openaiCodexAuth as any).recoverNativeCredential({
+      accessToken: old.access,
+      accountId: old.accountId,
+    })).resolves.toBe(true)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    })
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]!.body))).toEqual({
+      client_id: expect.any(String),
+      grant_type: 'refresh_token',
+      refresh_token: 'refresh-old',
+    })
+    expect(await readCredential(harness.home)).toMatchObject({
+      access: nextAccess,
+      refresh: 'refresh-new',
+      accountId: 'acct_new',
+    })
+    expect(harness.credentials.value).toBe(nextAccess)
+  })
+
+  it('reconciles an already-rotated managed authority without another refresh', async () => {
+    harness = await createHarness()
+    const previous = accessToken('acct_previous')
+    const current: OpenAICodexCredential = {
+      access: accessToken('acct_current'),
+      refresh: 'refresh-current',
+      expires: Date.now() + 3_600_000,
+      accountId: 'acct_current',
+    }
+    await writeCredential(harness.home, current)
+    harness.credentials.value = previous
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect((harness.root.openaiCodexAuth as any).recoverNativeCredential({
+      accessToken: previous,
+      accountId: 'acct_previous',
+    })).resolves.toBe(true)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(harness.credentials.value).toBe(current.access)
+    expect(await readCredential(harness.home)).toEqual(current)
+  })
+
+  it('detects external rotation per operation without importing external authority', async () => {
+    harness = await createHarness()
+    const previous = accessToken('acct_external_old')
+    const current = accessToken('acct_external_new')
+    harness.credentials.value = current
+    harness.credentials.source = 'env'
+    harness.credentials.writable = false
+    const setSpy = vi.spyOn(harness.credentials, 'set')
+    const unsetSpy = vi.spyOn(harness.credentials, 'unset')
+    const service = harness.root.openaiCodexAuth as any
+
+    await expect(service.recoverNativeCredential({
+      accessToken: previous,
+      accountId: 'acct_external_old',
+    })).resolves.toBe(true)
+    await expect(service.recoverNativeCredential({
+      accessToken: current,
+      accountId: 'acct_external_new',
+    })).resolves.toBe(false)
+
+    expect(setSpy).not.toHaveBeenCalled()
+    expect(unsetSpy).not.toHaveBeenCalled()
+    await expect(readFile(join(harness.home, 'openai-codex-auth.json'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('lets cancellation win during external recovery without importing authority', async () => {
+    harness = await createHarness()
+    const service = harness.root.openaiCodexAuth as any
+    await harness.fiber.dispose()
+    let releaseResolve!: () => void
+    const gate = new Promise<void>((resolve) => { releaseResolve = resolve })
+    const external = accessToken('acct_external')
+    const resolveSpy = vi.spyOn(harness.credentials, 'resolve').mockImplementationOnce(async () => {
+      await gate
+      return { value: external, source: 'env' }
+    })
+    const setSpy = vi.spyOn(harness.credentials, 'set')
+    const unsetSpy = vi.spyOn(harness.credentials, 'unset')
+    const controller = new AbortController()
+    const pending = service.recoverNativeCredential({
+      accessToken: accessToken('acct_previous'),
+      accountId: 'acct_previous',
+    }, controller.signal) as Promise<unknown>
+    await vi.waitFor(() => expect(resolveSpy).toHaveBeenCalledTimes(1))
+    controller.abort()
+    releaseResolve()
+
+    await expect(pending).rejects.toMatchObject({ code: 'ABORTED' })
+    expect(setSpy).not.toHaveBeenCalled()
+    expect(unsetSpy).not.toHaveBeenCalled()
+    await expect(readFile(join(harness.home, 'openai-codex-auth.json'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('preserves managed authority and returns sanitized typed refresh failures', async () => {
+    harness = await createHarness()
+    const current: OpenAICodexCredential = {
+      access: accessToken('acct_current'),
+      refresh: 'refresh-current',
+      expires: Date.now() + 3_600_000,
+      accountId: 'acct_current',
+    }
+    await writeCredential(harness.home, current)
+    harness.credentials.value = current.access
+    const service = harness.root.openaiCodexAuth as any
+    const previous = { accessToken: current.access, accountId: current.accountId }
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => Promise.resolve(new Response(JSON.stringify({
+        error: 'invalid_grant',
+      }), { status: 400, headers: { 'content-type': 'application/json' } })))
+      .mockImplementationOnce(() => Promise.resolve(new Response(JSON.stringify({
+        error: 'temporary_failure',
+      }), { status: 500, headers: { 'content-type': 'application/json' } })))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const terminal = await service.recoverNativeCredential(previous).catch((error: unknown) => error)
+    expect(terminal).toBeInstanceOf(LlmError)
+    expect(terminal).toMatchObject({ code: 'INVALID_CREDENTIAL', failure: { status: 400 } })
+    expect(terminal.message).not.toContain('invalid_grant')
+    expect(await readCredential(harness.home)).toEqual(current)
+    expect(harness.credentials.value).toBe(current.access)
+
+    const transient = await service.recoverNativeCredential(previous).catch((error: unknown) => error)
+    expect(transient).toBeInstanceOf(LlmError)
+    expect(transient).toMatchObject({ code: 'AUTH', failure: { status: 500 } })
+    expect(transient.message).not.toContain('temporary_failure')
+    expect(await readCredential(harness.home)).toEqual(current)
+    expect(harness.credentials.value).toBe(current.access)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('refreshes usage after a Codex turn and on explicit status refresh without idle polling', async () => {
     harness = await createHarness()
     const token = accessToken()

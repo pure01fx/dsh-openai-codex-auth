@@ -34,6 +34,12 @@
     "lib/catalog.d.ts",
     "lib/native-adapter.js",
     "lib/native-adapter.d.ts",
+    "lib/native-http.js",
+    "lib/native-http.d.ts",
+    "lib/responses.js",
+    "lib/responses.d.ts",
+    "lib/sse.js",
+    "lib/sse.d.ts",
     "client.js",
     "cordis.patch.yml",
     "assets/readme/hero.svg",
@@ -43,7 +49,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepack": "pnpm build"
   },
   "dsh": {
     "bundle": {

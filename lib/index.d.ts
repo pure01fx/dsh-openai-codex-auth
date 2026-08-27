@@ -114,7 +114,10 @@ export declare class OpenAICodexAuth extends Service {
     private resolveManagedCredentialLocked;
     /** Return a valid managed bearer token, refreshing and persisting it when near expiry. */
     bearerToken(signal?: AbortSignal): Promise<string | undefined>;
+    private externalNativeCredential;
     private resolveNativeCredential;
+    private nativeRecoveryError;
+    private recoverNativeCredential;
     private finishCredential;
     private finishAuthorizationCode;
     private settleFlow;

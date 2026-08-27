@@ -1,0 +1,7 @@
+data: {"type":"response.output_text.delta","item_id":"msg_redacted","content_index":0,"delta":"Hello"}
+
+data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_redacted","content":[{"type":"output_text","text":"Hello"}]}}
+
+data: {"type":"response.completed","response":{"id":"resp_redacted","usage":{"input_tokens":12,"output_tokens":3,"input_tokens_details":{"cached_tokens":4,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":1}}}}
+
+: eof

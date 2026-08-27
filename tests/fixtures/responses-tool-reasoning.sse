@@ -1,0 +1,15 @@
+data: {"type":"response.reasoning_summary_text.delta","item_id":"reason_redacted","summary_index":0,"delta":"Checked safely."}
+
+data: {"type":"response.reasoning_text.delta","item_id":"reason_redacted","content_index":0,"delta":"hidden chain"}
+
+data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"reason_redacted","summary":[{"type":"summary_text","text":"Checked safely."}],"encrypted_content":"encrypted_redacted"}}
+
+data: {"type":"response.output_item.added","item":{"type":"function_call","id":"call_item_redacted","call_id":"call_redacted","name":"lookup"}}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"call_item_redacted","delta":"{\"key\":\"safe\"}"}
+
+data: {"type":"response.output_item.done","item":{"type":"function_call","id":"call_item_redacted","call_id":"call_redacted","name":"lookup","arguments":"{\"key\":\"safe\"}"}}
+
+data: {"type":"response.completed","response":{"id":"resp_redacted"}}
+
+: eof

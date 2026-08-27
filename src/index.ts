@@ -14,6 +14,7 @@ import { join, resolve } from 'node:path'
 import { INVALID_CREDENTIAL_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import { NATIVE_CODEX_PROVIDER, NativeCodexAdapter } from './native-adapter.js'
 import { NativeCodexCatalog, type NativeCodexCredential } from './catalog.js'
+import { NativeCodexHttpTransport } from './native-http.js'
 
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 const AUTH_BASE_URL = 'https://auth.openai.com'
@@ -699,8 +700,28 @@ export class OpenAICodexAuth extends Service {
         resolveCredential: signal => this.resolveNativeCredential(signal),
         warn: message => { ctx.logger.warn(message) },
       })
+      const transport = new NativeCodexHttpTransport({
+        resolveCredential: signal => this.resolveNativeCredential(signal),
+        recoverCredential: (previous, signal) => this.recoverNativeCredential(previous, signal),
+        readImage: async (attachment, signal) => {
+          const store = ctx.get('attachments') as {
+            readImage(ref: unknown, signal?: AbortSignal): Promise<{ data: Uint8Array }>
+          } | undefined
+          if (store === undefined) {
+            throw new LlmError(
+              'native Codex image input requires the attachment service',
+              'UNSUPPORTED',
+            )
+          }
+          return store.readImage(attachment, signal)
+        },
+        warn: message => { ctx.logger.warn(message) },
+      })
       ctx.inject(['llm'], (llmCtx) => {
-        llmCtx.llm.registerAdapter([NATIVE_CODEX_PROVIDER], new NativeCodexAdapter(catalog))
+        llmCtx.llm.registerAdapter(
+          [NATIVE_CODEX_PROVIDER],
+          new NativeCodexAdapter(catalog, transport),
+        )
       })
     }
     ctx.effect(async () => {
@@ -946,6 +967,28 @@ export class OpenAICodexAuth extends Service {
     })
   }
 
+  private externalNativeCredential(accessToken: string): NativeCodexCredential {
+    let accountId: string
+    let expires: number | undefined
+    try {
+      accountId = chatGptAccountId(accessToken, 'access token')
+      expires = accessTokenExpiry(accessToken)
+    } catch (error) {
+      throw new LlmError(
+        'native Codex credential is not a valid ChatGPT access token',
+        INVALID_CREDENTIAL_CODE,
+        { cause: error },
+      )
+    }
+    if (expires !== undefined && expires <= Date.now()) {
+      throw new LlmError(
+        'native Codex ChatGPT access token has expired',
+        INVALID_CREDENTIAL_CODE,
+      )
+    }
+    return { accessToken, accountId }
+  }
+
   private async resolveNativeCredential(signal?: AbortSignal): Promise<NativeCodexCredential> {
     try {
       throwIfCancelled(signal)
@@ -961,26 +1004,9 @@ export class OpenAICodexAuth extends Service {
         if (external === undefined) {
           throw new LlmError('native Codex credential is not configured', 'MISSING_CREDENTIAL')
         }
-        let accountId: string
-        let expires: number | undefined
-        try {
-          accountId = chatGptAccountId(external.value, 'access token')
-          expires = accessTokenExpiry(external.value)
-        } catch (error) {
-          throw new LlmError(
-            'native Codex credential is not a valid ChatGPT access token',
-            INVALID_CREDENTIAL_CODE,
-            { cause: error },
-          )
-        }
-        if (expires !== undefined && expires <= Date.now()) {
-          throw new LlmError(
-            'native Codex ChatGPT access token has expired',
-            INVALID_CREDENTIAL_CODE,
-          )
-        }
+        const credential = this.externalNativeCredential(external.value)
         throwIfCancelled(signal)
-        return { accessToken: external.value, accountId }
+        return credential
       })
     } catch (error) {
       if (error instanceof LlmError) throw error
@@ -992,6 +1018,63 @@ export class OpenAICodexAuth extends Service {
         INVALID_CREDENTIAL_CODE,
         { cause: error },
       )
+    }
+  }
+
+  private nativeRecoveryError(error: unknown): LlmError {
+    const options = error instanceof OAuthEndpointError ? { status: error.status } : undefined
+    if (error instanceof CredentialNotWritableError || isPermanentRefreshError(error)) {
+      return new LlmError(
+        'native Codex managed credential cannot be refreshed',
+        INVALID_CREDENTIAL_CODE,
+        options,
+      )
+    }
+    return new LlmError(
+      'native Codex managed credential recovery failed',
+      'AUTH',
+      options,
+    )
+  }
+
+  private async recoverNativeCredential(
+    previous: NativeCodexCredential,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      throwIfCancelled(signal)
+      return await withFileLock(this.filename, async () => {
+        throwIfCancelled(signal)
+        const current = await readCredential(this.filename)
+        throwIfCancelled(signal)
+        if (current === undefined) {
+          const external = await this.ctx.credentials.resolve(TOKEN_REF)
+          throwIfCancelled(signal)
+          if (external === undefined) return false
+          const credential = this.externalNativeCredential(external.value)
+          throwIfCancelled(signal)
+          return credential.accessToken !== previous.accessToken
+            || credential.accountId !== previous.accountId
+        }
+        if (current.access !== previous.accessToken || current.accountId !== previous.accountId) {
+          await this.publishCredentialToken(current.access, signal)
+          throwIfCancelled(signal)
+          return true
+        }
+        await this.assertCredentialWritable()
+        throwIfCancelled(signal)
+        const next = await refreshToken(current, signal)
+        throwIfCancelled(signal)
+        await this.commitCredential(next)
+        throwIfCancelled(signal)
+        return next.access !== previous.accessToken || next.accountId !== previous.accountId
+      })
+    } catch (error) {
+      if (error instanceof LlmError) throw error
+      if (signal?.aborted) {
+        throw new LlmError('native Codex credential recovery was aborted', 'ABORTED')
+      }
+      throw this.nativeRecoveryError(error)
     }
   }
 
