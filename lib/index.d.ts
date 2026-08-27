@@ -14,6 +14,7 @@ export interface OpenAICodexCredential {
 export interface Config {
     path?: string;
     dshHome?: string;
+    nativeAdapter?: boolean;
 }
 interface UsageWindow {
     usedPercent: number;
@@ -47,6 +48,13 @@ interface ParsedDevicePoll {
     value?: DeviceTokenCode;
     message?: string;
 }
+interface TokenResponse {
+    access_token?: unknown;
+    refresh_token?: unknown;
+    expires_in?: unknown;
+    id_token?: unknown;
+}
+declare function parseTokenResponse(value: TokenResponse | null, previous?: OpenAICodexCredential): OpenAICodexCredential;
 /** Reduce the OpenAI response to the stable fields displayed by the Web card. */
 export declare function normalizeUsage(value: unknown): UsageSummary;
 declare function parseAuthority(authority: string | undefined): URL | undefined;
@@ -59,6 +67,7 @@ declare function startDeviceAuthorization(signal?: AbortSignal): Promise<DeviceA
 declare function parseDevicePollResponse(response: Response): Promise<ParsedDevicePoll>;
 declare function pollDeviceAuthorization(device: DeviceAuthorization, signal?: AbortSignal): Promise<DeviceTokenCode>;
 export declare const internals: {
+    parseTokenResponse: typeof parseTokenResponse;
     parseAuthority: typeof parseAuthority;
     isLoopbackHostname: typeof isLoopbackHostname;
     isTrustedHost: typeof isTrustedHost;
@@ -97,7 +106,11 @@ export declare class OpenAICodexAuth extends Service {
     private performUsageRefresh;
     private refreshUsage;
     private assertCredentialWritable;
-    private storeCredentialToken;
+    private publishCredentialToken;
+    private restorePublishedCredential;
+    private publicationChangedError;
+    private failAfterPublicationRollback;
+    private commitCredential;
     /** Return a valid bearer token, refreshing and persisting it when near expiry. */
     bearerToken(signal?: AbortSignal): Promise<string | undefined>;
     private finishCredential;

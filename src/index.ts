@@ -1,7 +1,7 @@
 /** Native OpenAI Codex OAuth login for DeepSeek Harness. */
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { credentialRef, type ResolvedCredential } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
@@ -11,6 +11,7 @@ import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import { createHash, randomBytes } from 'node:crypto'
 import { readFile, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import { NATIVE_CODEX_PROVIDER, NativeCodexAdapter } from './native-adapter.js'
 
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 const AUTH_BASE_URL = 'https://auth.openai.com'
@@ -28,6 +29,7 @@ const BROWSER_LOGIN_TIMEOUT_MS = 10 * 60_000
 const DEFAULT_DEVICE_INTERVAL_SECONDS = 5
 const MIN_DEVICE_INTERVAL_MS = 1_000
 const SLOW_DOWN_INCREMENT_MS = 5_000
+const TOKEN_REFRESH_PREEMPT_MS = 5 * 60_000
 const DEFAULT_FILENAME = 'openai-codex-auth.json'
 const TOKEN_REF = credentialRef('DSH_OPENAI_CODEX_TOKEN')
 const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
@@ -43,7 +45,7 @@ export interface OpenAICodexCredential {
 }
 
 /** Plugin configuration. */
-export interface Config { path?: string; dshHome?: string }
+export interface Config { path?: string; dshHome?: string; nativeAdapter?: boolean }
 
 interface Document { version: 1; credential: OpenAICodexCredential }
 
@@ -121,6 +123,27 @@ class DeviceCodeUnavailableError extends Error {
 class LoginConflictError extends Error {}
 class CredentialNotWritableError extends Error {}
 
+const PERMANENT_REFRESH_CODES = new Set([
+  'refresh_token_expired',
+  'refresh_token_reused',
+  'refresh_token_invalidated',
+  'invalid_grant',
+])
+
+class OAuthEndpointError extends Error {
+  constructor(message: string, readonly status: number, readonly oauthCode?: string) {
+    super(message)
+    this.name = 'OAuthEndpointError'
+  }
+}
+
+interface TokenResponse {
+  access_token?: unknown
+  refresh_token?: unknown
+  expires_in?: unknown
+  id_token?: unknown
+}
+
 function base64Url(value: Buffer): string {
   return value.toString('base64url')
 }
@@ -129,23 +152,73 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function accountId(access: string): string {
-  const parts = access.split('.')
-  if (parts.length !== 3) throw new Error('OpenAI returned an invalid access token')
-  const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as {
-    'https://api.openai.com/auth'?: { chatgpt_account_id?: unknown }
+function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error('OpenAI login cancelled')
+}
+
+function jwtPayload(token: string, label: string): Record<string, unknown> {
+  const parts = token.split('.')
+  if (parts.length !== 3) throw new Error(`OpenAI returned an invalid ${label}`)
+  try {
+    const value = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as unknown
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error()
+    return value as Record<string, unknown>
+  } catch {
+    throw new Error(`OpenAI returned an invalid ${label}`)
   }
-  const id = payload['https://api.openai.com/auth']?.chatgpt_account_id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('OpenAI token has no ChatGPT account id')
+}
+
+function accountId(idToken: string): string {
+  const auth = jwtPayload(idToken, 'ID token')['https://api.openai.com/auth']
+  const id = auth !== null && typeof auth === 'object'
+    ? (auth as Record<string, unknown>).chatgpt_account_id
+    : undefined
+  if (typeof id !== 'string' || id.length === 0) throw new Error('OpenAI ID token has no ChatGPT account id')
   return id
+}
+
+function accessTokenExpiry(access: string): number | undefined {
+  const exp = jwtPayload(access, 'access token').exp
+  return typeof exp === 'number' && Number.isFinite(exp) && exp > 0 ? exp * 1_000 : undefined
+}
+
+function parseTokenResponse(value: TokenResponse | null, previous?: OpenAICodexCredential): OpenAICodexCredential {
+  if (value === null || typeof value.access_token !== 'string' || value.access_token.length === 0) {
+    throw new Error('OpenAI token response has no access token')
+  }
+  const refresh = value.refresh_token === undefined ? previous?.refresh : value.refresh_token
+  if (typeof refresh !== 'string' || refresh.length === 0) {
+    throw new Error('OpenAI token response has no refresh token')
+  }
+  const expires = typeof value.expires_in === 'number' && Number.isFinite(value.expires_in) && value.expires_in > 0
+    ? Date.now() + value.expires_in * 1_000
+    : accessTokenExpiry(value.access_token)
+  if (expires === undefined) throw new Error('OpenAI token response has no usable expiry')
+  const idToken = value.id_token
+  if (idToken !== undefined && (typeof idToken !== 'string' || idToken.length === 0)) {
+    throw new Error('OpenAI token response has an invalid ID token')
+  }
+  const resolvedAccountId = idToken === undefined
+    ? previous?.accountId
+    : accountId(idToken)
+  if (resolvedAccountId === undefined) throw new Error('OpenAI token response has no ID token')
+  return { access: value.access_token, refresh, expires, accountId: resolvedAccountId }
+}
+
+function isPermanentRefreshError(error: unknown): boolean {
+  return error instanceof OAuthEndpointError
+    && (error.status === 401
+      || (error.oauthCode !== undefined && PERMANENT_REFRESH_CODES.has(error.oauthCode.toLowerCase())))
 }
 
 function parseCredential(text: string, filename: string): OpenAICodexCredential {
   const value = JSON.parse(text) as Partial<Document>
   const credential = value.credential
   if (value.version !== 1 || credential === undefined
-    || typeof credential.access !== 'string' || typeof credential.refresh !== 'string'
-    || typeof credential.expires !== 'number' || typeof credential.accountId !== 'string') {
+    || typeof credential.access !== 'string' || credential.access.length === 0
+    || typeof credential.refresh !== 'string' || credential.refresh.length === 0
+    || typeof credential.expires !== 'number' || !Number.isFinite(credential.expires)
+    || typeof credential.accountId !== 'string' || credential.accountId.length === 0) {
     throw new Error(`openai-codex-auth: invalid credential document ${filename}`)
   }
   return credential
@@ -201,32 +274,45 @@ function parseManualAuthorizationInput(input: string): { code: string; state?: s
   return { code: text }
 }
 
-async function tokenRequest(body: URLSearchParams, signal?: AbortSignal): Promise<OpenAICodexCredential> {
+async function tokenRequest(
+  init: RequestInit,
+  previous?: OpenAICodexCredential,
+  signal?: AbortSignal,
+): Promise<OpenAICodexCredential> {
   let response: Response
   try {
-    response = await fetch(TOKEN_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body,
-      ...signal === undefined ? {} : { signal },
-    })
+    response = await fetch(TOKEN_URL, { method: 'POST', ...init, ...signal === undefined ? {} : { signal } })
   } catch (error) {
     if (signal?.aborted) throw new Error('OpenAI login cancelled')
     throw error
   }
   if (!response.ok) {
     const text = await responseText(response)
-    throw new Error(`OpenAI token request failed (HTTP ${response.status})${text ? `: ${text}` : ''}`)
+    throw new OAuthEndpointError(
+      `OpenAI token request failed (HTTP ${response.status})${text ? `: ${text}` : ''}`,
+      response.status,
+      errorCodeFromText(text),
+    )
   }
-  const value = await response.json() as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown } | null
-  if (value === null || typeof value.access_token !== 'string' || typeof value.refresh_token !== 'string'
-    || typeof value.expires_in !== 'number') throw new Error('OpenAI token response is incomplete')
-  return {
-    access: value.access_token,
-    refresh: value.refresh_token,
-    expires: Date.now() + value.expires_in * 1000,
-    accountId: accountId(value.access_token),
-  }
+  return parseTokenResponse(await response.json() as TokenResponse | null, previous)
+}
+
+function exchangeToken(body: URLSearchParams, signal?: AbortSignal): Promise<OpenAICodexCredential> {
+  return tokenRequest({
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  }, undefined, signal)
+}
+
+function refreshToken(current: OpenAICodexCredential, signal?: AbortSignal): Promise<OpenAICodexCredential> {
+  return tokenRequest({
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      client_id: CLIENT_ID,
+      grant_type: 'refresh_token',
+      refresh_token: current.refresh,
+    }),
+  }, current, signal)
 }
 
 function optionalNumber(value: unknown): number | undefined {
@@ -476,13 +562,14 @@ async function startDeviceAuthorization(signal?: AbortSignal): Promise<DeviceAut
 function errorCodeFromText(text: string): string | undefined {
   if (!text) return undefined
   try {
-    const value = JSON.parse(text) as { error?: unknown }
+    const value = JSON.parse(text) as { error?: unknown; code?: unknown }
     const error = value?.error
     if (typeof error === 'string') return error
     if (error !== null && typeof error === 'object') {
       const code = (error as { code?: unknown }).code
       return typeof code === 'string' ? code : undefined
     }
+    return typeof value.code === 'string' ? value.code : undefined
   } catch {
     return undefined
   }
@@ -562,6 +649,7 @@ async function pollDeviceAuthorization(device: DeviceAuthorization, signal?: Abo
 }
 
 export const internals = {
+  parseTokenResponse,
   parseAuthority,
   isLoopbackHostname,
   isTrustedHost,
@@ -583,7 +671,11 @@ declare module '@deepseek-ai/cordis' {
 
 /** DSH service providing device-code/browser login, logout, and automatically refreshed bearer tokens. */
 export class OpenAICodexAuth extends Service {
-  static Config: z<Config> = z.object({ path: z.string(), dshHome: z.string() })
+  static Config: z<Config> = z.object({
+    path: z.string(),
+    dshHome: z.string(),
+    nativeAdapter: z.boolean().default(false),
+  })
   static inject = ['credentials', 'webServer', 'webRuntime']
   private readonly filename: string
   private readonly csrf = base64Url(randomBytes(24))
@@ -600,10 +692,14 @@ export class OpenAICodexAuth extends Service {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'openaiCodexAuth')
     this.filename = resolve(config.path ?? join(resolveDshHome(config.dshHome), DEFAULT_FILENAME))
+    if (config.nativeAdapter) {
+      ctx.inject(['llm'], (llmCtx) => {
+        llmCtx.llm.registerAdapter([NATIVE_CODEX_PROVIDER], new NativeCodexAdapter())
+      })
+    }
     ctx.effect(async () => {
       try {
-        const token = await this.bearerToken()
-        if (token !== undefined) await this.storeCredentialToken(token)
+        await this.bearerToken()
       } catch (error) {
         this.lastLoginError = messageOf(error)
         ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
@@ -612,7 +708,9 @@ export class OpenAICodexAuth extends Service {
     }, 'openai-codex-auth: bootstrap credential')
     ctx.on('agent/request', async ({ agent, turn }, next) => {
       const request = await next()
-      if (request.provider === 'openai-codex') this.markCodexTurn(String(agent.id), turn)
+      if (request.provider === 'openai-codex' || request.provider === NATIVE_CODEX_PROVIDER) {
+        this.markCodexTurn(String(agent.id), turn)
+      }
       return request
     }, { global: true, prepend: true })
     ctx.on('session/event', (session, event) => {
@@ -625,7 +723,6 @@ export class OpenAICodexAuth extends Service {
     ctx.effect(() => {
       const timer = setInterval(() => {
         void this.bearerToken()
-          .then(token => token === undefined ? undefined : this.storeCredentialToken(token))
           .catch((error: unknown) => { this.usageError = messageOf(error) })
       }, 60_000)
       return () => { clearInterval(timer) }
@@ -732,47 +829,126 @@ export class OpenAICodexAuth extends Service {
     }
   }
 
-  private async storeCredentialToken(token: string): Promise<void> {
-    await this.assertCredentialWritable()
+  private async publishCredentialToken(token: string, signal?: AbortSignal): Promise<void> {
+    const resolved = await this.ctx.credentials.resolve(TOKEN_REF)
+    throwIfCancelled(signal)
+    if (resolved?.value === token) return
+    const info = await this.ctx.credentials.describe(TOKEN_REF)
+    throwIfCancelled(signal)
+    if (!info.writable) {
+      throw new CredentialNotWritableError(`DSH_OPENAI_CODEX_TOKEN is supplied by read-only source ${info.source ?? 'unknown'} and does not match the managed OpenAI credential`)
+    }
     await this.ctx.credentials.set(TOKEN_REF, token)
+  }
+
+  private async restorePublishedCredential(previous: ResolvedCredential | undefined): Promise<void> {
+    if (previous === undefined) await this.ctx.credentials.unset(TOKEN_REF)
+    else await this.ctx.credentials.set(TOKEN_REF, previous.value)
+  }
+
+  private publicationChangedError(failure: unknown): AggregateError {
+    return new AggregateError(
+      [failure, new Error('DSH_OPENAI_CODEX_TOKEN changed concurrently; rollback was skipped')],
+      'OpenAI credential publication failed after its DSH credential authority changed',
+    )
+  }
+
+  private async failAfterPublicationRollback(
+    previous: ResolvedCredential | undefined,
+    expectedCurrent: string | undefined,
+    failure: unknown,
+  ): Promise<never> {
+    let current: ResolvedCredential | undefined
+    try {
+      current = await this.ctx.credentials.resolve(TOKEN_REF)
+    } catch (resolveError) {
+      throw new AggregateError(
+        [failure, resolveError],
+        'OpenAI credential publication failed and rollback safety could not be verified',
+      )
+    }
+    if (current?.value !== expectedCurrent) throw this.publicationChangedError(failure)
+    try {
+      await this.restorePublishedCredential(previous)
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [failure, rollbackError],
+        'OpenAI credential publication failed and its prior DSH credential could not be restored',
+      )
+    }
+    throw failure
+  }
+
+  private async commitCredential(credential: OpenAICodexCredential): Promise<void> {
+    const previous = await this.ctx.credentials.resolve(TOKEN_REF)
+    try {
+      await this.ctx.credentials.set(TOKEN_REF, credential.access)
+    } catch (error) {
+      let current: ResolvedCredential | undefined
+      try {
+        current = await this.ctx.credentials.resolve(TOKEN_REF)
+      } catch {
+        return this.failAfterPublicationRollback(previous, credential.access, error)
+      }
+      if (current?.value === credential.access) {
+        return this.failAfterPublicationRollback(previous, credential.access, error)
+      }
+      if (current?.value !== previous?.value) throw this.publicationChangedError(error)
+      throw error
+    }
+    try {
+      await this.write(credential)
+    } catch (error) {
+      return this.failAfterPublicationRollback(previous, credential.access, error)
+    }
   }
 
   /** Return a valid bearer token, refreshing and persisting it when near expiry. */
   async bearerToken(signal?: AbortSignal): Promise<string | undefined> {
+    throwIfCancelled(signal)
     return withFileLock(this.filename, async () => {
+      throwIfCancelled(signal)
       const current = await readCredential(this.filename)
+      throwIfCancelled(signal)
       if (current === undefined) return undefined
-      if (current.expires > Date.now() + 60_000) return current.access
+      if (current.expires > Date.now() + TOKEN_REFRESH_PREEMPT_MS) {
+        await this.publishCredentialToken(current.access, signal)
+        return current.access
+      }
       await this.assertCredentialWritable()
-      const next = await tokenRequest(new URLSearchParams({
-        grant_type: 'refresh_token', refresh_token: current.refresh, client_id: CLIENT_ID,
-      }), signal)
-      if (signal?.aborted) throw new Error('OpenAI login cancelled')
-      await this.write(next)
-      if (signal?.aborted) throw new Error('OpenAI login cancelled')
-      await this.ctx.credentials.set(TOKEN_REF, next.access)
+      let next: OpenAICodexCredential
+      try {
+        next = await refreshToken(current, signal)
+      } catch (error) {
+        throwIfCancelled(signal)
+        if (!isPermanentRefreshError(error) && current.expires > Date.now()) {
+          await this.publishCredentialToken(current.access, signal)
+          return current.access
+        }
+        throw error
+      }
+      throwIfCancelled(signal)
+      await this.commitCredential(next)
       return next.access
     })
   }
 
   private async finishCredential(credential: OpenAICodexCredential, signal: AbortSignal): Promise<void> {
     await this.assertCredentialWritable()
-    if (signal.aborted) throw new Error('OpenAI login cancelled')
+    throwIfCancelled(signal)
     await withFileLock(this.filename, async () => {
-      if (signal.aborted) throw new Error('OpenAI login cancelled')
-      await this.write(credential)
+      throwIfCancelled(signal)
+      await this.commitCredential(credential)
+      this.usageGeneration += 1
+      if (this.usageRefresh !== undefined) this.usageRefresh.queued = true
+      this.usageCache = undefined
+      this.usageError = undefined
     })
-    this.usageGeneration += 1
-    if (this.usageRefresh !== undefined) this.usageRefresh.queued = true
-    this.usageCache = undefined
-    this.usageError = undefined
-    if (signal.aborted) throw new Error('OpenAI login cancelled')
-    await this.ctx.credentials.set(TOKEN_REF, credential.access)
     this.lastLoginError = undefined
   }
 
   private async finishAuthorizationCode(code: string, verifier: string, redirectUri: string, signal: AbortSignal): Promise<void> {
-    const credential = await tokenRequest(new URLSearchParams({
+    const credential = await exchangeToken(new URLSearchParams({
       grant_type: 'authorization_code', client_id: CLIENT_ID, code,
       code_verifier: verifier, redirect_uri: redirectUri,
     }), signal)
@@ -921,7 +1097,7 @@ export class OpenAICodexAuth extends Service {
     const url = new URL(AUTHORIZE_URL)
     for (const [key, value] of Object.entries({
       response_type: 'code', client_id: CLIENT_ID, redirect_uri: redirectUri,
-      scope: 'openid profile email offline_access', code_challenge: challenge,
+      scope: 'openid profile email offline_access api.connectors.read api.connectors.invoke', code_challenge: challenge,
       code_challenge_method: 'S256', state, id_token_add_organizations: 'true',
       codex_cli_simplified_flow: 'true', originator: 'deepseek-harness',
     })) url.searchParams.set(key, value)
@@ -985,24 +1161,35 @@ export class OpenAICodexAuth extends Service {
   private async logout(): Promise<void> {
     await this.cancelLogin(true)
     await withFileLock(this.filename, async () => {
-      try { await unlink(this.filename) } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const previous = await this.ctx.credentials.resolve(TOKEN_REF)
+      try {
+        await this.ctx.credentials.unset(TOKEN_REF)
+      } catch (error) {
+        let current: ResolvedCredential | undefined
+        try {
+          current = await this.ctx.credentials.resolve(TOKEN_REF)
+        } catch {
+          return this.failAfterPublicationRollback(previous, undefined, error)
+        }
+        if (current === undefined) {
+          return this.failAfterPublicationRollback(previous, undefined, error)
+        }
+        if (current.value !== previous?.value) throw this.publicationChangedError(error)
+        throw error
+      }
+      try {
+        await unlink(this.filename)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          return this.failAfterPublicationRollback(previous, undefined, error)
+        }
       }
     })
-    let unsetError: unknown
-    try {
-      await this.ctx.credentials.unset(TOKEN_REF)
-    } catch (error) {
-      unsetError = error
-    }
     this.usageGeneration += 1
     if (this.usageRefresh !== undefined) this.usageRefresh.queued = false
     this.usageCache = undefined
     this.usageError = undefined
     this.lastLoginError = undefined
-    if (unsetError !== undefined) {
-      throw new Error(`Local OpenAI credential was removed, but DSH_OPENAI_CODEX_TOKEN could not be unset: ${messageOf(unsetError)}`)
-    }
   }
 
   private async status(refresh: boolean, callbackUrl: string | undefined): Promise<Record<string, unknown>> {

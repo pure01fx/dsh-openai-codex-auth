@@ -10,3 +10,5 @@ PLAN.md
 lib/*
 !lib/index.js
 !lib/index.d.ts
+!lib/native-adapter.js
+!lib/native-adapter.d.ts
