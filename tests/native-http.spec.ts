@@ -3,7 +3,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile } from 'node:fs/promises'
 import { LlmError, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { NativeCodexHttpTransport } from '../src/native-http.ts'
-import type { NativeCodexCredential } from '../src/catalog.ts'
+import { NATIVE_CODEX_PROVIDER } from '../src/native-adapter.ts'
+import { nativeCodexAuthorityHash, type NativeCodexCredential } from '../src/catalog.ts'
 
 const SUCCESS_SSE = await readFile(
   new URL('./fixtures/responses-text-usage.sse', import.meta.url),
@@ -123,7 +124,17 @@ describe('NativeCodexHttpTransport', () => {
             reasoningTokens: 1,
           },
         },
-        { type: 'finish', reason: { kind: 'stop' } },
+        {
+          type: 'finish',
+          reason: { kind: 'stop' },
+          replayState: {
+            kind: 'openai-codex-native.responses-replay',
+            version: 1,
+            provider: NATIVE_CODEX_PROVIDER,
+            model: 'gpt-test',
+            items: [{ type: 'message', id: 'msg_redacted', blocks: [0] }],
+          },
+        },
       ])
       expect(captured).toBeDefined()
       expect(captured!.method).toBe('POST')
@@ -138,6 +149,7 @@ describe('NativeCodexHttpTransport', () => {
       expect(routingId).toBe('private-session-id')
       expect(captured!.headers['thread-id']).toBe(routingId)
       expect(captured!.headers['x-client-request-id']).toBe(routingId)
+      expect(captured!.headers['x-codex-routing-hint']).toBe('model=gpt-test')
       expect(captured!.headers['x-openai-subagent']).toBe('compact')
       const body = JSON.parse(captured!.body)
       const promptCacheKey = String(body.prompt_cache_key)
@@ -204,6 +216,109 @@ describe('NativeCodexHttpTransport', () => {
     expect(routes.every(route => route.header !== route.cache)).toBe(true)
   })
 
+  it('keeps Standard/Fast identity stable and Fast retry immutable', async () => {
+    const captured: Array<{ headers: Headers; body: Record<string, unknown> }> = []
+    const fetchMock = vi.fn(async (_input: URL | RequestInfo, init?: RequestInit) => {
+      captured.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) })
+      return captured.length === 2 ? new Response('', { status: 503 }) : successResponse()
+    })
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: fetchMock as typeof fetch,
+      maxTransientRetries: 1,
+      sleep: async () => {},
+    })
+    const generation = request({
+      sessionId: 'stable-session' as GenerateOptions['sessionId'],
+    })
+
+    await collect(transport.stream(generation))
+    await collect(transport.stream(generation, {
+      serviceTier: 'priority', publicModel: 'gpt-test-fast',
+      authorityHash: nativeCodexAuthorityHash(CREDENTIAL.accountId),
+    }))
+
+    expect(captured).toHaveLength(3)
+    expect(captured.map(row => ({
+      session: row.headers.get('session-id'),
+      thread: row.headers.get('thread-id'),
+      request: row.headers.get('x-client-request-id'),
+      cache: row.body.prompt_cache_key,
+      model: row.body.model,
+    }))).toEqual(Array.from({ length: 3 }, () => ({
+      session: 'stable-session',
+      thread: 'stable-session',
+      request: 'stable-session',
+      cache: captured[0]?.body.prompt_cache_key,
+      model: 'gpt-test',
+    })))
+    expect(captured[0]?.body).not.toHaveProperty('service_tier')
+    expect(captured[0]?.headers.get('x-codex-routing-hint')).toBe('model=gpt-test')
+    for (const row of captured.slice(1)) {
+      expect(row.body.service_tier).toBe('priority')
+      expect(row.headers.get('x-codex-routing-hint')).toBe('model=gpt-test;tier=priority')
+      expect(JSON.stringify(row.body)).not.toContain('gpt-test-fast')
+    }
+    expect(captured[1]?.body).toEqual(captured[2]?.body)
+  })
+
+  it('refuses Fast before fetch when catalog and request accounts differ', async () => {
+    const fetchMock = vi.fn(async () => successResponse())
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => ({ accessToken: 'token-b', accountId: 'account-b' }),
+      fetch: fetchMock as typeof fetch,
+    })
+    await expect(collect(transport.stream(request(), {
+      serviceTier: 'priority',
+      publicModel: 'gpt-test-fast',
+      authorityHash: nativeCodexAuthorityHash('account-a'),
+    }))).rejects.toMatchObject({ code: 'FAST_CAPABILITY_UNAVAILABLE' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('permits same-account Fast 401 recovery but refuses an account switch', async () => {
+    const sameAccountCredentials = [
+      { accessToken: 'old-token', accountId: 'account-a' },
+      { accessToken: 'new-token', accountId: 'account-a' },
+    ]
+    const sameBodies: string[] = []
+    const sameFetch = vi.fn(async (_input: URL | RequestInfo, init?: RequestInit) => {
+      sameBodies.push(String(init?.body))
+      return sameBodies.length === 1 ? new Response('', { status: 401 }) : successResponse()
+    })
+    let sameIndex = 0
+    const sameTransport = new NativeCodexHttpTransport({
+      resolveCredential: async () => sameAccountCredentials[Math.min(sameIndex++, 1)]!,
+      recoverCredential: async () => true,
+      fetch: sameFetch as typeof fetch,
+    })
+    const mode = {
+      serviceTier: 'priority' as const,
+      publicModel: 'gpt-test-fast',
+      authorityHash: nativeCodexAuthorityHash('account-a'),
+    }
+    await expect(collect(sameTransport.stream(request(), mode))).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'finish' })]),
+    )
+    expect(sameBodies).toHaveLength(2)
+    expect(sameBodies[0]).toBe(sameBodies[1])
+
+    const switchedCredentials = [
+      { accessToken: 'old-token', accountId: 'account-a' },
+      { accessToken: 'new-token', accountId: 'account-b' },
+    ]
+    let switchedIndex = 0
+    const switchedFetch = vi.fn(async () => new Response('', { status: 401 }))
+    const switchedTransport = new NativeCodexHttpTransport({
+      resolveCredential: async () => switchedCredentials[Math.min(switchedIndex++, 1)]!,
+      recoverCredential: async () => true,
+      fetch: switchedFetch as typeof fetch,
+    })
+    await expect(collect(switchedTransport.stream(request(), mode)))
+      .rejects.toMatchObject({ code: 'FAST_CAPABILITY_UNAVAILABLE' })
+    expect(switchedFetch).toHaveBeenCalledTimes(1)
+  })
+
   it('resolves attachment bytes into a verified user image data URL', async () => {
     let body: any
     const fetchMock = vi.fn(async (_input: URL | RequestInfo, init?: RequestInit) => {
@@ -240,6 +355,66 @@ describe('NativeCodexHttpTransport', () => {
     }])
   })
 
+  it('replays captured encrypted reasoning and function state on the next tool turn', async () => {
+    const toolSse = await readFile(
+      new URL('./fixtures/responses-tool-reasoning.sse', import.meta.url),
+      'utf8',
+    )
+    const bodies: Array<Record<string, any>> = []
+    const fetchMock = vi.fn(async (_input: URL | RequestInfo, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      return bodies.length === 1 ? successResponse(toolSse) : successResponse()
+    })
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: fetchMock as typeof fetch,
+    })
+    const first = await collect(transport.stream(request()))
+    const finish = first.find(chunk => chunk.type === 'finish')
+    if (finish?.type !== 'finish' || finish.replayState === undefined) {
+      throw new Error('first turn did not produce replay state')
+    }
+
+    await collect(transport.stream(request({
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'reasoning', text: 'Checked safely.' },
+            { type: 'tool-call', id: 'call_redacted', name: 'lookup', arguments: '{"key":"safe"}' },
+          ],
+          source: {
+            kind: 'model', provider: NATIVE_CODEX_PROVIDER, model: 'gpt-test',
+            replayState: JSON.parse(JSON.stringify(finish.replayState)),
+          },
+        },
+        {
+          role: 'user',
+          content: [{
+            type: 'tool-result', toolCallId: 'call_redacted',
+            content: [{ type: 'text', text: 'found' }],
+          }],
+          source: { kind: 'tool', callId: 'call_redacted' },
+        },
+      ] as unknown as GenerateOptions['messages'],
+    })))
+
+    expect(bodies[1]?.input).toEqual([
+      {
+        type: 'reasoning', id: 'reason_redacted',
+        summary: [{ type: 'summary_text', text: 'Checked safely.' }],
+        encrypted_content: 'encrypted_redacted',
+      },
+      {
+        type: 'function_call', id: 'call_item_redacted', call_id: 'call_redacted',
+        name: 'lookup', arguments: '{"key":"safe"}',
+      },
+      { type: 'function_call_output', call_id: 'call_redacted', output: 'found' },
+    ])
+    expect(JSON.stringify(finish.replayState)).not.toContain('Checked safely.')
+    expect(JSON.stringify(finish.replayState)).not.toContain('lookup')
+  })
+
   it('recovers one rejected credential and re-resolves authority for the retry', async () => {
     let credential = CREDENTIAL
     const seenAuthorization: string[] = []
@@ -262,9 +437,11 @@ describe('NativeCodexHttpTransport', () => {
       fetch: fetchMock as typeof fetch,
     })
 
-    await expect(collect(transport.stream(request()))).resolves.toContainEqual({
-      type: 'finish', reason: { kind: 'stop' },
-    })
+    await expect(collect(transport.stream(request()))).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } }),
+      ]),
+    )
     expect(recoverCredential).toHaveBeenCalledTimes(1)
     expect(cancelRejected).toHaveBeenCalledTimes(1)
     expect(resolveCredential).toHaveBeenCalledTimes(2)
@@ -366,11 +543,39 @@ describe('NativeCodexHttpTransport', () => {
       sleep: async delay => { delays.push(delay) },
     })
 
-    await expect(collect(transport.stream(request()))).resolves.toContainEqual({
-      type: 'finish', reason: { kind: 'stop' },
-    })
+    await expect(collect(transport.stream(request()))).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } }),
+      ]),
+    )
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(delays).toEqual([200])
+  })
+
+  it('discards failed-attempt encrypted replay capture before retry', async () => {
+    const failedAttempt = [
+      'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_failed","summary":[],"encrypted_content":"failed_attempt_ciphertext"}}',
+      '',
+      '',
+    ].join('\n')
+    const successfulAttempt = await readFile(
+      new URL('./fixtures/responses-tool-reasoning.sse', import.meta.url),
+      'utf8',
+    )
+    let attempts = 0
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: vi.fn(async () => successResponse(attempts++ === 0 ? failedAttempt : successfulAttempt)) as typeof fetch,
+      maxTransientRetries: 1,
+      sleep: async () => {},
+    })
+
+    const chunks = await collect(transport.stream(request()))
+    const finish = chunks.find(chunk => chunk.type === 'finish')
+    expect(finish).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
+    expect(JSON.stringify(finish)).toContain('encrypted_redacted')
+    expect(JSON.stringify(finish)).not.toContain('failed_attempt_ciphertext')
+    expect(attempts).toBe(2)
   })
 
   it('never retries after a visible block and preserves the stream-close failure', async () => {

@@ -50,9 +50,15 @@ export interface NativeCodexModel {
   inputModalities: readonly string[]
 }
 
+export interface NativeCodexCatalogView {
+  models: readonly NativeCodexModel[]
+  authorityHash?: string
+}
+
 /** Narrow catalog seam consumed by the adapter and injectable in tests. */
 export interface NativeCodexModelCatalog {
   list(signal?: AbortSignal): Promise<readonly NativeCodexModel[]>
+  listWithAuthority?(signal?: AbortSignal): Promise<NativeCodexCatalogView>
   etag(): string | undefined
 }
 
@@ -277,7 +283,7 @@ function parseModelsPayload(value: unknown): readonly NativeCodexModel[] {
   return models
 }
 
-function accountHash(accountId: string): string {
+export function nativeCodexAuthorityHash(accountId: string): string {
   return createHash('sha256').update(accountId).digest('hex')
 }
 
@@ -309,6 +315,10 @@ export class NativeCodexCatalog implements NativeCodexModelCatalog {
   }
 
   async list(signal?: AbortSignal): Promise<readonly NativeCodexModel[]> {
+    return (await this.listWithAuthority(signal)).models
+  }
+
+  async listWithAuthority(signal?: AbortSignal): Promise<NativeCodexCatalogView> {
     throwIfAborted(signal)
     this.currentEtag = undefined
     let credential: NativeCodexCredential
@@ -319,10 +329,10 @@ export class NativeCodexCatalog implements NativeCodexModelCatalog {
       if (!(error instanceof LlmError) || error.code !== 'MISSING_CREDENTIAL') {
         this.options.warn?.('native Codex credential is unavailable; model metadata is advisory')
       }
-      return []
+      return { models: [] }
     }
     throwIfAborted(signal)
-    const hash = accountHash(credential.accountId)
+    const hash = nativeCodexAuthorityHash(credential.accountId)
     const cached = this.snapshot?.clientVersion === this.clientVersion
         && this.snapshot.accountHash === hash
       ? this.snapshot
@@ -331,7 +341,7 @@ export class NativeCodexCatalog implements NativeCodexModelCatalog {
     const age = cached === undefined ? Number.POSITIVE_INFINITY : this.now() - cached.fetchedAt
     if (cached !== undefined && age >= 0 && age <= this.cacheTtlMs) {
       this.currentEtag = cached.etag
-      return cached.models
+      return { models: cached.models, authorityHash: hash }
     }
     try {
       let refresh = this.refreshes.get(hash)
@@ -349,7 +359,7 @@ export class NativeCodexCatalog implements NativeCodexModelCatalog {
       }
       const fresh = await awaitWithSignal(refresh, signal)
       this.currentEtag = fresh.etag
-      return fresh.models
+      return { models: fresh.models, authorityHash: hash }
     } catch (error) {
       if (error instanceof LlmError && error.code === 'ABORTED') throw error
       if (error instanceof CatalogFetchError
@@ -359,11 +369,11 @@ export class NativeCodexCatalog implements NativeCodexModelCatalog {
         && age <= this.maxStaleMs) {
         this.currentEtag = cached.etag
         this.options.warn?.(`native Codex catalog refresh failed (${error.code}); using bounded stale cache`)
-        return cached.models
+        return { models: cached.models, authorityHash: hash }
       }
       const code = error instanceof LlmError ? error.code : 'UNKNOWN'
       this.options.warn?.(`native Codex catalog refresh failed (${code}); model metadata is advisory`)
-      return []
+      return { models: [], authorityHash: hash }
     }
   }
 

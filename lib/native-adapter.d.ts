@@ -3,9 +3,16 @@ import { LlmAdapter, type GenerateOptions, type LlmModelInfo, type LlmProviderIn
 import type { NativeCodexModelCatalog } from './catalog.js';
 /** Provider route reserved for the package-owned native Codex adapter. */
 export declare const NATIVE_CODEX_PROVIDER = "openai-codex-native";
+export declare const CODEX_FAST_ALIAS_SUFFIX = "-fast";
+export declare const CODEX_FAST_SERVICE_TIER = "priority";
 /** Request-scoped native Codex transport owned by this package. */
+export interface NativeCodexTransportMode {
+    serviceTier?: typeof CODEX_FAST_SERVICE_TIER;
+    publicModel?: string;
+    authorityHash?: string;
+}
 export interface NativeCodexTransport {
-    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
+    stream(options: GenerateOptions, mode?: NativeCodexTransportMode): AsyncIterable<StreamChunk>;
 }
 /** Package-owned DSH adapter with live catalog metadata and native transport delegation. */
 export declare class NativeCodexAdapter extends LlmAdapter {

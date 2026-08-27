@@ -6,6 +6,12 @@ import {
   type ContentBlock, type GenerateOptions, type StreamChunk, type TokenUsage, type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse, type ParseSseOptions } from './sse.js'
+import {
+  NativeCodexReplayCapture,
+  replayAssistantInput,
+  replayableItemId,
+  type NativeCodexReplaySource,
+} from './replay.js'
 
 export const DEFAULT_CODEX_INSTRUCTIONS = 'You are Codex, an AI coding agent. Help the user with software engineering tasks.'
 const CALL_ID_MAX_LENGTH = 64
@@ -23,6 +29,7 @@ export type ResolvedContentPart = Exclude<ContentBlock, { type: 'image' | 'tool-
 export interface ResolvedMessage {
   role: 'system' | 'user' | 'assistant'
   content: readonly ResolvedContentPart[]
+  replaySource?: NativeCodexReplaySource
 }
 export interface ResponsesRequestInput { instructions?: string; input: Record<string, unknown>[] }
 
@@ -60,6 +67,12 @@ export function toResponsesInput(
   const input: Record<string, unknown>[] = []
   const systemTexts: string[] = []
   for (const message of messages) {
+    if (message.role === 'assistant' && message.replaySource !== undefined) {
+      input.push(...replayAssistantInput(
+        message.content as readonly ContentBlock[], message.replaySource,
+      ))
+      continue
+    }
     let content: Record<string, unknown>[] = []
     const flush = (): void => {
       if (content.length === 0) return
@@ -157,11 +170,18 @@ function assertSupportedOptions(options: GenerateOptions): void {
   }
 }
 
-/** Build the canonical Standard-tier M3 HTTP Responses body. */
+export interface ResponsesRequestMode { serviceTier?: 'priority' }
+
+/** Build the canonical Standard/Fast HTTP Responses body. */
 export function codexRequestBody(
-  options: GenerateOptions, messages: readonly ResolvedMessage[],
+  options: GenerateOptions,
+  messages: readonly ResolvedMessage[],
+  mode: ResponsesRequestMode = {},
 ): Record<string, unknown> {
   assertSupportedOptions(options)
+  if (mode.serviceTier !== undefined && mode.serviceTier !== 'priority') {
+    throw fixedError('native Codex service tier is invalid', 'INVALID_ARGS')
+  }
   const resolved = toResponsesInput(messages, options.system)
   return {
     model: options.model,
@@ -176,6 +196,7 @@ export function codexRequestBody(
     store: false,
     stream: true,
     include: ['reasoning.encrypted_content'],
+    ...mode.serviceTier === undefined ? {} : { service_tier: mode.serviceTier },
     ...options.sessionId === undefined ? {} : { prompt_cache_key: String(options.sessionId) },
   }
 }
@@ -280,13 +301,22 @@ function closeBlock(block: OpenBlock): ContentBlock {
   return { type: 'tool-call', id: CallId(block.callId), name: block.name ?? '', arguments: block.text }
 }
 
+export interface ResponsesReplayContext { provider: string; model: string }
+
 /** Stateful, transport-free Responses event to DSH chunk translator. */
 export class ResponsesStreamTranslator {
   private readonly blocks = new Map<string, OpenBlock>()
   private readonly order: OpenBlock[] = []
+  private readonly replayCapture: NativeCodexReplayCapture | undefined
   private nextIndex = 0
   private sawToolCall = false
   terminated = false
+
+  constructor(private readonly replayContext?: ResponsesReplayContext) {
+    this.replayCapture = replayContext === undefined
+      ? undefined
+      : new NativeCodexReplayCapture(replayContext.provider, replayContext.model)
+  }
 
   private open(
     key: string, kind: OpenBlock['kind'], chunks: StreamChunk[], callId = '', name?: string,
@@ -316,10 +346,6 @@ export class ResponsesStreamTranslator {
       }
     }
   }
-  private captureCompletedItem(_item: ResponsesOutputItem): void {
-    // Private M4 seam: encrypted completed items are not exposed or replayed in M3.
-  }
-
   push(event: ResponsesStreamEvent): StreamChunk[] {
     if (this.terminated) return []
     const chunks: StreamChunk[] = []
@@ -377,7 +403,7 @@ export class ResponsesStreamTranslator {
         if (item?.id === undefined || item.id.length === 0) {
           throw fixedError('native Codex completed item has no identity', 'MALFORMED_RESPONSE')
         }
-        this.captureCompletedItem(item)
+        const replayId = this.replayContext === undefined ? undefined : replayableItemId(item.id)
         if (item.type === 'function_call') {
           if (item.call_id === undefined || item.call_id.length === 0
             || item.name === undefined || item.name.length === 0
@@ -397,31 +423,76 @@ export class ResponsesStreamTranslator {
           block.name = item.name
           if (block.text.length === 0) block.text = item.arguments
           this.close(key, chunks)
+          if (this.replayContext !== undefined) this.replayCapture?.add({
+            type: 'function_call', ...(replayId === undefined ? {} : { id: replayId }),
+            block: block.index,
+          })
         } else if (item.type === 'message') {
-          if (![...this.blocks.keys()].some(key => key.startsWith(`${item.id}:text:`))) {
-            for (const [index, part] of (item.content ?? []).entries()) {
-              if (part.type !== 'output_text' || typeof part.text !== 'string' || part.text.length === 0) continue
-              const key = `${item.id}:text:${String(index)}`
-              const block = this.open(key, 'text', chunks)
-              block.text = part.text
-              this.close(key, chunks)
-            }
+          if (!Array.isArray(item.content)) {
+            throw fixedError('native Codex message item has invalid content', 'MALFORMED_RESPONSE')
           }
-          this.closeItem(item.id, chunks)
+          const refs: number[] = []
+          const expected = new Set<string>()
+          for (const [index, part] of item.content.entries()) {
+            if (part.type !== 'output_text' || typeof part.text !== 'string' || part.text.length === 0) {
+              throw fixedError('native Codex message item has unsupported content', 'MALFORMED_RESPONSE')
+            }
+            const key = `${item.id}:text:${String(index)}`
+            expected.add(key)
+            const block = this.blocks.get(key) ?? this.open(key, 'text', chunks)
+            if (block.text.length > 0 && block.text !== part.text) {
+              throw fixedError('native Codex text changed during streaming', 'MALFORMED_RESPONSE')
+            }
+            if (block.text.length === 0) block.text = part.text
+            refs.push(block.index)
+            this.close(key, chunks)
+          }
+          if ([...this.blocks.keys()].some(
+            key => key.startsWith(`${item.id}:text:`) && !expected.has(key),
+          )) throw fixedError('native Codex message item has unmatched text', 'MALFORMED_RESPONSE')
+          if (this.replayContext !== undefined) this.replayCapture?.add({
+            type: 'message', ...(replayId === undefined ? {} : { id: replayId }), blocks: refs,
+          })
         } else if (item.type === 'reasoning') {
-          if (![...this.blocks.keys()].some(key => key.startsWith(`${item.id}:summary:`))) {
-            for (const [index, part] of (item.summary ?? []).entries()) {
-              if (typeof part !== 'object' || part === null) continue
-              const text = (part as { text?: unknown }).text
-              if (typeof text !== 'string' || text.length === 0) continue
-              const key = `${item.id}:summary:${String(index)}`
-              const block = this.open(key, 'reasoning', chunks)
-              block.text = text
-              this.close(key, chunks)
-            }
+          if (!Array.isArray(item.summary)) {
+            throw fixedError('native Codex reasoning summary is invalid', 'MALFORMED_RESPONSE')
           }
-          this.closeItem(item.id, chunks)
-        } else this.closeItem(item.id, chunks)
+          const refs: number[] = []
+          const expected = new Set<string>()
+          for (const [index, part] of item.summary.entries()) {
+            if (typeof part !== 'object' || part === null
+              || (part as { type?: unknown }).type !== 'summary_text'
+              || typeof (part as { text?: unknown }).text !== 'string'
+              || (part as { text: string }).text.length === 0) {
+              throw fixedError('native Codex reasoning summary is invalid', 'MALFORMED_RESPONSE')
+            }
+            const text = (part as { text: string }).text
+            const key = `${item.id}:summary:${String(index)}`
+            expected.add(key)
+            const block = this.blocks.get(key) ?? this.open(key, 'reasoning', chunks)
+            if (block.text.length > 0 && block.text !== text) {
+              throw fixedError('native Codex reasoning summary changed during streaming', 'MALFORMED_RESPONSE')
+            }
+            if (block.text.length === 0) block.text = text
+            refs.push(block.index)
+            this.close(key, chunks)
+          }
+          if ([...this.blocks.keys()].some(
+            key => key.startsWith(`${item.id}:summary:`) && !expected.has(key),
+          )) throw fixedError('native Codex reasoning item has unmatched summary', 'MALFORMED_RESPONSE')
+          const encryptedContent: unknown = item.encrypted_content
+          if (encryptedContent !== undefined && encryptedContent !== null
+            && (typeof encryptedContent !== 'string' || encryptedContent.length === 0)) {
+            throw fixedError('native Codex encrypted reasoning is invalid', 'MALFORMED_RESPONSE')
+          }
+          if (this.replayContext !== undefined) this.replayCapture?.add({
+            type: 'reasoning', ...(replayId === undefined ? {} : { id: replayId }), blocks: refs,
+            ...typeof encryptedContent === 'string'
+              ? { encryptedContent } : {},
+          })
+        } else {
+          throw fixedError('native Codex completed item type is unsupported', 'UNSUPPORTED')
+        }
         return chunks
       }
       case 'response.completed': {
@@ -430,12 +501,27 @@ export class ResponsesStreamTranslator {
         if (event.response?.usage !== undefined) {
           chunks.push({ type: 'usage', usage: mapResponsesUsage(event.response.usage) })
         }
+        const replayState = this.order.length === 0
+          ? undefined
+          : this.replayCapture?.finish()
+        if (this.order.length > 0 && this.replayContext !== undefined) {
+          if (replayState === undefined) {
+            throw fixedError('native Codex completed response has no replay descriptors', 'MALFORMED_RESPONSE')
+          }
+          replayAssistantInput(this.order.map(closeBlock), {
+            ...this.replayContext,
+            replayState,
+          })
+        }
         chunks.push(this.order.length === 0
           ? { type: 'finish', reason: { kind: 'error', failure: {
               message: 'native Codex returned a completed response with no content',
               code: EMPTY_RESPONSE_CODE,
             } } }
-          : { type: 'finish', reason: { kind: this.sawToolCall ? 'tool-calls' : 'stop' } })
+          : {
+              type: 'finish', reason: { kind: this.sawToolCall ? 'tool-calls' : 'stop' },
+              ...(replayState === undefined ? {} : { replayState }),
+            })
         return chunks
       }
       case 'response.incomplete': {
@@ -465,13 +551,16 @@ export class ResponsesStreamTranslator {
   }
 }
 
-export interface StreamResponsesOptions extends ParseSseOptions { onMalformedEvent?: () => void }
+export interface StreamResponsesOptions extends ParseSseOptions {
+  onMalformedEvent?: () => void
+  replayContext?: ResponsesReplayContext
+}
 
 /** Consume framed SSE JSON into DSH chunks. */
 export async function* streamResponses(
   stream: ReadableStream<Uint8Array>, options: StreamResponsesOptions = {},
 ): AsyncGenerator<StreamChunk> {
-  const translator = new ResponsesStreamTranslator()
+  const translator = new ResponsesStreamTranslator(options.replayContext)
   for await (const frame of parseSse(stream, options)) {
     let event: ResponsesStreamEvent
     try { event = JSON.parse(frame.data) as ResponsesStreamEvent } catch {

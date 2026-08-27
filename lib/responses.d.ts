@@ -1,5 +1,6 @@
 import { CallId, LlmError, type ContentBlock, type GenerateOptions, type StreamChunk, type TokenUsage, type ToolSchema } from '@deepseek-ai/dsh-llm';
 import { type ParseSseOptions } from './sse.js';
+import { type NativeCodexReplaySource } from './replay.js';
 export declare const DEFAULT_CODEX_INSTRUCTIONS = "You are Codex, an AI coding agent. Help the user with software engineering tasks.";
 export interface ResolvedImagePart {
     type: 'image';
@@ -18,6 +19,7 @@ export type ResolvedContentPart = Exclude<ContentBlock, {
 export interface ResolvedMessage {
     role: 'system' | 'user' | 'assistant';
     content: readonly ResolvedContentPart[];
+    replaySource?: NativeCodexReplaySource;
 }
 export interface ResponsesRequestInput {
     instructions?: string;
@@ -28,8 +30,11 @@ export declare function toResponsesTools(tools: readonly ToolSchema[]): Record<s
 export declare function toResponsesInput(messages: readonly ResolvedMessage[], system?: string): ResponsesRequestInput;
 /** Bound call ids while preserving every function call/result correlation. */
 export declare function normalizeCodexCallIds(input: readonly Record<string, unknown>[]): Record<string, unknown>[];
-/** Build the canonical Standard-tier M3 HTTP Responses body. */
-export declare function codexRequestBody(options: GenerateOptions, messages: readonly ResolvedMessage[]): Record<string, unknown>;
+export interface ResponsesRequestMode {
+    serviceTier?: 'priority';
+}
+/** Build the canonical Standard/Fast HTTP Responses body. */
+export declare function codexRequestBody(options: GenerateOptions, messages: readonly ResolvedMessage[], mode?: ResponsesRequestMode): Record<string, unknown>;
 export interface ResponsesUsage {
     input_tokens: number;
     output_tokens: number;
@@ -84,23 +89,30 @@ export interface ResponsesStreamEvent {
     code?: string;
     message?: string;
 }
+export interface ResponsesReplayContext {
+    provider: string;
+    model: string;
+}
 /** Stateful, transport-free Responses event to DSH chunk translator. */
 export declare class ResponsesStreamTranslator {
+    private readonly replayContext?;
     private readonly blocks;
     private readonly order;
+    private readonly replayCapture;
     private nextIndex;
     private sawToolCall;
     terminated: boolean;
+    constructor(replayContext?: ResponsesReplayContext | undefined);
     private open;
     private close;
     private closeItem;
     private closeAll;
-    private captureCompletedItem;
     push(event: ResponsesStreamEvent): StreamChunk[];
     endOfStream(): never;
 }
 export interface StreamResponsesOptions extends ParseSseOptions {
     onMalformedEvent?: () => void;
+    replayContext?: ResponsesReplayContext;
 }
 /** Consume framed SSE JSON into DSH chunks. */
 export declare function streamResponses(stream: ReadableStream<Uint8Array>, options?: StreamResponsesOptions): AsyncGenerator<StreamChunk>;

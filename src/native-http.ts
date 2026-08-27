@@ -13,7 +13,8 @@ import {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type { NativeCodexCredential } from './catalog.js'
+import { nativeCodexAuthorityHash, type NativeCodexCredential } from './catalog.js'
+import type { NativeCodexTransportMode } from './native-adapter.js'
 import {
   codexRequestBody,
   streamResponses,
@@ -233,7 +234,16 @@ async function resolveMessages(
           throw fixedFailure('native Codex request contains an unsupported content block', 'UNSUPPORTED')
       }
     }
-    messages.push({ role: message.role, content })
+    const source = message.source
+    const replaySource = message.role === 'assistant' && source?.kind === 'model'
+      && source.replayState !== undefined
+      ? { provider: source.provider, model: source.model, replayState: source.replayState }
+      : undefined
+    messages.push({
+      role: message.role,
+      content,
+      ...(replaySource === undefined ? {} : { replaySource }),
+    })
   }
   return messages
 }
@@ -402,8 +412,14 @@ export class NativeCodexHttpTransport {
     await (this.options.sleep ?? sleep)(delay, signal)
   }
 
-  async *stream(generation: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(
+    generation: GenerateOptions, mode: NativeCodexTransportMode = {},
+  ): AsyncIterable<StreamChunk> {
     throwIfAborted(generation.signal)
+    if (generation.model.length === 0 || generation.model.length > 256
+      || /[\r\n\0;]/u.test(generation.model)) {
+      throw fixedFailure('native Codex model identity is invalid', 'INVALID_ARGS')
+    }
     const messages = await resolveMessages(generation, this.options)
     throwIfAborted(generation.signal)
     const sessionId = generation.sessionId === undefined ? undefined : String(generation.sessionId)
@@ -412,6 +428,9 @@ export class NativeCodexHttpTransport {
       throw fixedFailure('native Codex session identity is invalid', 'INVALID_ARGS')
     }
     const routingId = sessionId ?? (this.options.createRequestId?.() ?? randomUUID())
+    const routingHint = mode.serviceTier === undefined
+      ? `model=${generation.model}`
+      : `model=${generation.model};tier=${mode.serviceTier}`
     const wireOptions = sessionId === undefined
       ? generation
       : {
@@ -420,7 +439,7 @@ export class NativeCodexHttpTransport {
         }
     let body: string
     try {
-      body = JSON.stringify(codexRequestBody(wireOptions, messages))
+      body = JSON.stringify(codexRequestBody(wireOptions, messages, mode))
     } catch (error) {
       if (error instanceof LlmError) throw error
       throw fixedFailure('native Codex request could not be encoded', 'INVALID_ARGS', { cause: error })
@@ -441,6 +460,14 @@ export class NativeCodexHttpTransport {
       try {
         credential = await this.options.resolveCredential(watchdog.signal)
         throwIfAborted(watchdog.signal)
+        if (mode.serviceTier !== undefined
+          && (mode.authorityHash === undefined
+            || nativeCodexAuthorityHash(credential.accountId) !== mode.authorityHash)) {
+          throw fixedFailure(
+            'native Codex Fast capability authority changed before request',
+            'FAST_CAPABILITY_UNAVAILABLE',
+          )
+        }
         response = await this.fetchImpl(this.endpoint, {
           method: 'POST',
           headers: {
@@ -450,6 +477,7 @@ export class NativeCodexHttpTransport {
             'session-id': routingId,
             'thread-id': routingId,
             'x-client-request-id': routingId,
+            'x-codex-routing-hint': routingHint,
             ...(generation.purpose === 'compaction' ? { 'x-openai-subagent': 'compact' } : {}),
             accept: 'text/event-stream',
             'content-type': 'application/json',
@@ -515,6 +543,10 @@ export class NativeCodexHttpTransport {
             : { maxEventBytes: this.options.maxSseEventBytes },
           onMalformedEvent: () => {
             this.options.warn?.('native Codex ignored a malformed SSE event')
+          },
+          replayContext: {
+            provider: generation.provider,
+            model: mode.publicModel ?? generation.model,
           },
         })) {
           emitted = true

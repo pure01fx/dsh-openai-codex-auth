@@ -5,6 +5,7 @@ import {
   CODEX_CATALOG_CACHE_TTL_MS,
   CODEX_CLIENT_VERSION,
   NativeCodexCatalog,
+  nativeCodexAuthorityHash,
   type NativeCodexCredential,
 } from '../src/catalog.ts'
 
@@ -78,6 +79,9 @@ describe('NativeCodexCatalog', () => {
     expect(snapshot).not.toContain(CREDENTIAL.accountId)
     expect((JSON.parse(snapshot) as { snapshot: { etag: string } }).snapshot.etag)
       .toBe('W/"fixture-etag"')
+    await expect(catalog.listWithAuthority()).resolves.toMatchObject({
+      authorityHash: nativeCodexAuthorityHash(CREDENTIAL.accountId),
+    })
   })
 
   it('retains service-tier discovery and Codex context/modality fallbacks', async () => {

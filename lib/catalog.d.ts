@@ -34,9 +34,14 @@ export interface NativeCodexModel {
     contextWindow?: number;
     inputModalities: readonly string[];
 }
+export interface NativeCodexCatalogView {
+    models: readonly NativeCodexModel[];
+    authorityHash?: string;
+}
 /** Narrow catalog seam consumed by the adapter and injectable in tests. */
 export interface NativeCodexModelCatalog {
     list(signal?: AbortSignal): Promise<readonly NativeCodexModel[]>;
+    listWithAuthority?(signal?: AbortSignal): Promise<NativeCodexCatalogView>;
     etag(): string | undefined;
 }
 export interface NativeCodexCatalogOptions {
@@ -50,6 +55,7 @@ export interface NativeCodexCatalogOptions {
     now?: () => number;
     warn?: (message: string) => void;
 }
+export declare function nativeCodexAuthorityHash(accountId: string): string;
 /** Codex-compatible live catalog with bounded stale fallback and no credential retention. */
 export declare class NativeCodexCatalog implements NativeCodexModelCatalog {
     private readonly options;
@@ -66,5 +72,6 @@ export declare class NativeCodexCatalog implements NativeCodexModelCatalog {
     constructor(options: NativeCodexCatalogOptions);
     etag(): string | undefined;
     list(signal?: AbortSignal): Promise<readonly NativeCodexModel[]>;
+    listWithAuthority(signal?: AbortSignal): Promise<NativeCodexCatalogView>;
     private fetchCatalog;
 }

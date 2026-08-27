@@ -125,6 +125,19 @@ describe('Responses request translation', () => {
     })
   })
 
+  it('adds only the priority tier for a Fast wire request', () => {
+    const standard = codexRequestBody(options({ model: 'gpt-base' }), [])
+    const fast = codexRequestBody(options({ model: 'gpt-base' }), [], {
+      serviceTier: 'priority',
+    })
+    expect(standard).not.toHaveProperty('service_tier')
+    expect(fast).toEqual({ ...standard, service_tier: 'priority' })
+    expect(fast.model).toBe('gpt-base')
+    expect(errorOf(() => codexRequestBody(
+      options({ model: 'gpt-base' }), [], { serviceTier: 'invalid' } as never,
+    ))).toMatchObject({ code: 'INVALID_ARGS' })
+  })
+
   it.each([
     ['temperature', { temperature: 0 }],
     ['maxTokens', { maxTokens: 10 }],

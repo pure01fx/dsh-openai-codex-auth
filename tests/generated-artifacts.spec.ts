@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest'
+import { execFile } from 'node:child_process'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { promisify } from 'node:util'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import OpenAICodexAuth from '../lib/index.js'
 import { NativeCodexCatalog } from '../lib/catalog.js'
 import { NativeCodexHttpTransport } from '../lib/native-http.js'
 import { codexRequestBody } from '../lib/responses.js'
 import { parseSse } from '../lib/sse.js'
+import { createNativeCodexReplayState, replayAssistantInput } from '../lib/replay.js'
 import {
   NATIVE_CODEX_PROVIDER,
   NativeCodexAdapter,
@@ -16,6 +22,8 @@ describe('generated package artifacts', () => {
     expect(NativeCodexHttpTransport).toBeTypeOf('function')
     expect(codexRequestBody).toBeTypeOf('function')
     expect(parseSse).toBeTypeOf('function')
+    expect(createNativeCodexReplayState).toBeTypeOf('function')
+    expect(replayAssistantInput).toBeTypeOf('function')
     const adapter = new NativeCodexAdapter({
       etag: () => undefined,
       list: async () => [{
@@ -37,6 +45,72 @@ describe('generated package artifacts', () => {
       name: 'Generated Model',
       inputModalities: ['text'],
     }])
+  })
+
+  it('runs generated Fast routing and restart-safe replay semantics', async () => {
+    const seen: Array<{ model: string; tier?: string }> = []
+    const model = {
+      slug: 'generated/fast', displayName: 'Generated Fast',
+      supportedReasoningLevels: [], visibility: 'list' as const, supportedInApi: false,
+      priority: 0, additionalSpeedTiers: ['fast'], serviceTiers: [],
+      inputModalities: ['text'],
+    }
+    const adapter = new NativeCodexAdapter({
+      list: async () => [model],
+      listWithAuthority: async () => ({ models: [model], authorityHash: 'authority-a' }),
+      etag: () => undefined,
+    }, {
+      async *stream(options, mode) {
+        seen.push({
+          model: options.model,
+          ...(mode?.serviceTier === undefined ? {} : { tier: mode.serviceTier }),
+        })
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    })
+    for await (const _chunk of adapter.stream({
+      provider: NATIVE_CODEX_PROVIDER,
+      model: 'generated/fast-fast',
+      messages: [],
+    })) { /* consume */ }
+    expect(seen).toEqual([{ model: 'generated/fast', tier: 'priority' }])
+
+    const state = createNativeCodexReplayState(NATIVE_CODEX_PROVIDER, 'generated/fast-fast', [
+      { type: 'message', blocks: [0] },
+    ])
+    expect(replayAssistantInput([{ type: 'text', text: 'durable' }], {
+      provider: NATIVE_CODEX_PROVIDER,
+      model: 'generated/fast-fast',
+      replayState: JSON.parse(JSON.stringify(state)),
+    })).toEqual([{
+      type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'durable' }],
+    }])
+  })
+
+  it('matches every committed generated module to a fresh TypeScript build', async () => {
+    const temporary = await mkdtemp(join(tmpdir(), 'dsh-codex-build-'))
+    try {
+      await promisify(execFile)(join(process.cwd(), 'node_modules/.bin/tsc'), [
+        '--outDir', temporary,
+        '--declarationDir', temporary,
+      ])
+      const modules = [
+        'catalog', 'index', 'native-adapter', 'native-http',
+        'replay', 'responses', 'sse',
+      ]
+      for (const module of modules) {
+        for (const extension of ['js', 'd.ts']) {
+          const name = `${module}.${extension}`
+          const [fresh, committed] = await Promise.all([
+            readFile(join(temporary, name), 'utf8'),
+            readFile(join(process.cwd(), 'lib', name), 'utf8'),
+          ])
+          expect(fresh).toBe(committed)
+        }
+      }
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
   })
 
   it('runs generated M3 transport cancellation semantics', async () => {

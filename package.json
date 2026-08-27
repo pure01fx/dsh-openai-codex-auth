@@ -38,6 +38,8 @@
     "lib/native-http.d.ts",
     "lib/responses.js",
     "lib/responses.d.ts",
+    "lib/replay.js",
+    "lib/replay.d.ts",
     "lib/sse.js",
     "lib/sse.d.ts",
     "client.js",

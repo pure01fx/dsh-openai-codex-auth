@@ -148,7 +148,7 @@ describe('NativeCodexAdapter catalog boundary', () => {
         supportedInApi: false,
         priority: 1,
         additionalSpeedTiers: [],
-        serviceTiers: [],
+        serviceTiers: [{ id: 'priority', name: 'Fast' }],
         inputModalities: ['text'],
       },
       {
@@ -176,6 +176,13 @@ describe('NativeCodexAdapter catalog boundary', () => {
       },
       {
         provider: NATIVE_CODEX_PROVIDER,
+        id: 'visible/first-fast',
+        name: 'Visible First (Fast)',
+        description: 'first by priority even when API-hidden',
+        inputModalities: ['text'],
+      },
+      {
+        provider: NATIVE_CODEX_PROVIDER,
         id: 'visible/later',
         name: 'Visible Later',
         inputModalities: [],
@@ -197,6 +204,15 @@ describe('NativeCodexAdapter catalog boundary', () => {
         defaultEffort: 'xhigh',
       },
     })
+    await expect(adapter.resolveModel(NATIVE_CODEX_PROVIDER, 'hidden/model-fast')).resolves
+      .toMatchObject({
+        provider: NATIVE_CODEX_PROVIDER,
+        id: 'hidden/model-fast',
+        name: 'Hidden Model (Fast)',
+        context: { contextWindow: 272000 },
+      })
+    await expect(adapter.resolveModel(NATIVE_CODEX_PROVIDER, 'visible/later-fast')).rejects
+      .toMatchObject({ code: 'FAST_UNSUPPORTED' })
     expect(await adapter.resolveModel(NATIVE_CODEX_PROVIDER, 'visible/later')).toEqual({
       provider: NATIVE_CODEX_PROVIDER,
       id: 'visible/later',
@@ -215,6 +231,111 @@ describe('NativeCodexAdapter catalog boundary', () => {
     dispose()
   })
 
+  it('maps a Fast stream to the base model and never silently downgrades', async () => {
+    const fastModel: NativeCodexModel = {
+      slug: 'gpt-fast-capable',
+      displayName: 'Fast Capable',
+      supportedReasoningLevels: [],
+      visibility: 'list',
+      supportedInApi: false,
+      priority: 0,
+      additionalSpeedTiers: ['fast'],
+      serviceTiers: [],
+      inputModalities: ['text'],
+    }
+    const seen: Array<{
+      options: GenerateOptions
+      mode?: { serviceTier?: 'priority'; publicModel?: string; authorityHash?: string }
+    }> = []
+    const transport = {
+      async *stream(
+        options: GenerateOptions, mode?: { serviceTier?: 'priority'; publicModel?: string; authorityHash?: string },
+      ): AsyncIterable<StreamChunk> {
+        seen.push({ options, ...(mode === undefined ? {} : { mode }) })
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }
+    const adapter = new NativeCodexAdapter(
+      {
+        list: async () => [fastModel],
+        listWithAuthority: async () => ({ models: [fastModel], authorityHash: 'authority-a' }),
+        etag: () => undefined,
+      },
+      transport,
+    )
+
+    await expect(collect(adapter.stream({
+      ...request(), model: 'gpt-fast-capable-fast',
+    }))).resolves.toEqual([{ type: 'finish', reason: { kind: 'stop' } }])
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.options.model).toBe('gpt-fast-capable')
+    expect(seen[0]?.mode).toEqual({
+      serviceTier: 'priority', publicModel: 'gpt-fast-capable-fast',
+      authorityHash: 'authority-a',
+    })
+
+    await expect(collect(adapter.stream({
+      ...request(), model: 'missing-fast',
+    }))).rejects.toMatchObject({ code: 'FAST_UNSUPPORTED' })
+    expect(seen).toHaveLength(1)
+  })
+
+  it('refuses Fast when account-bound catalog authority is unavailable', async () => {
+    const fastModel = {
+      slug: 'account-bound', displayName: 'Account Bound',
+      supportedReasoningLevels: [], visibility: 'list' as const, supportedInApi: false,
+      priority: 0, additionalSpeedTiers: ['fast'], serviceTiers: [],
+      inputModalities: ['text'],
+    }
+    const stream = vi.fn()
+    const adapter = new NativeCodexAdapter(
+      { list: async () => [fastModel], etag: () => undefined },
+      { stream },
+    )
+    await expect(collect(adapter.stream({ ...request(), model: 'account-bound-fast' })))
+      .rejects.toMatchObject({ code: 'FAST_CAPABILITY_UNAVAILABLE' })
+    expect(stream).not.toHaveBeenCalled()
+  })
+
+  it('gives exact wire slugs precedence over colliding Fast aliases', async () => {
+    const base = {
+      slug: 'model', displayName: 'Base', supportedReasoningLevels: [],
+      visibility: 'list', supportedInApi: false, priority: 0,
+      additionalSpeedTiers: ['fast'], serviceTiers: [], inputModalities: ['text'],
+    } satisfies NativeCodexModel
+    const exactFastSlug = {
+      slug: 'model-fast', displayName: 'Exact Fast-Suffixed Wire Model',
+      supportedReasoningLevels: [], visibility: 'list', supportedInApi: false, priority: 1,
+      additionalSpeedTiers: [], serviceTiers: [], inputModalities: ['text'],
+    } satisfies NativeCodexModel
+    const seen: Array<{ model: string; tier?: string }> = []
+    const adapter = new NativeCodexAdapter(
+      { list: async () => [base, exactFastSlug], etag: () => undefined },
+      { async *stream(options, mode) {
+        seen.push({
+          model: options.model,
+          ...(mode?.serviceTier === undefined ? {} : { tier: mode.serviceTier }),
+        })
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      } },
+    )
+
+    await expect(adapter.listModels(NATIVE_CODEX_PROVIDER)).resolves.toEqual([
+      { provider: NATIVE_CODEX_PROVIDER, id: 'model', name: 'Base', inputModalities: ['text'] },
+      {
+        provider: NATIVE_CODEX_PROVIDER,
+        id: 'model-fast',
+        name: 'Exact Fast-Suffixed Wire Model',
+        inputModalities: ['text'],
+      },
+    ])
+    await expect(adapter.resolveModel(NATIVE_CODEX_PROVIDER, 'model-fast')).resolves.toMatchObject({
+      id: 'model-fast', name: 'Exact Fast-Suffixed Wire Model',
+    })
+    await collect(adapter.stream({ ...request(), model: 'model-fast' }))
+    expect(seen).toEqual([{ model: 'model-fast' }])
+  })
+
   it('registers the opt-in route and streams through external authority', async () => {
     const home = await mkdtemp(join(tmpdir(), 'openai-codex-native-registration-'))
     const credentials = new RegistrationCredentials()
@@ -222,7 +343,9 @@ describe('NativeCodexAdapter catalog boundary', () => {
     ctx.provide('credentials', credentials as never)
     ctx.provide('webServer', new RegistrationWebServer() as never)
     ctx.provide('webRuntime', { lanAddresses: [], trustedHosts: [] })
-    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+    let responsesBody: Record<string, unknown> | undefined
+    let responsesHeaders: Headers | undefined
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
       if (String(input).includes('/models?')) {
         return new Response(JSON.stringify({
           models: [{
@@ -233,9 +356,12 @@ describe('NativeCodexAdapter catalog boundary', () => {
             visibility: 'list',
             priority: 1,
             supported_in_api: false,
+            service_tiers: [{ id: 'priority', name: 'Fast', description: 'Priority processing' }],
           }],
         }), { status: 200 })
       }
+      responsesBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+      responsesHeaders = new Headers(init?.headers)
       return new Response([
         'data: {"type":"response.output_text.delta","item_id":"msg-integration","delta":"ok"}',
         '',
@@ -255,19 +381,42 @@ describe('NativeCodexAdapter catalog boundary', () => {
           name: 'OpenAI Codex (Native, Experimental)',
         })
       })
-      await expect(ctx.llm.listModels(NATIVE_CODEX_PROVIDER)).resolves.toEqual([{
-        provider: NATIVE_CODEX_PROVIDER,
-        id: 'catalog/model',
-        name: 'Catalog Model',
-        inputModalities: ['text', 'image'],
-      }])
-      await expect(collect(ctx.llm.stream(request()))).resolves.toEqual([
+      await expect(ctx.llm.listModels(NATIVE_CODEX_PROVIDER)).resolves.toEqual([
+        {
+          provider: NATIVE_CODEX_PROVIDER,
+          id: 'catalog/model',
+          name: 'Catalog Model',
+          inputModalities: ['text', 'image'],
+        },
+        {
+          provider: NATIVE_CODEX_PROVIDER,
+          id: 'catalog/model-fast',
+          name: 'Catalog Model (Fast)',
+          inputModalities: ['text', 'image'],
+        },
+      ])
+      await expect(collect(ctx.llm.stream({
+        ...request(), model: 'catalog/model-fast',
+      }))).resolves.toEqual([
         { type: 'block-start', index: 0, blockType: 'text' },
         { type: 'text-delta', index: 0, text: 'ok' },
         { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } },
         { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
-        { type: 'finish', reason: { kind: 'stop' } },
+        {
+          type: 'finish',
+          reason: { kind: 'stop' },
+          replayState: {
+            kind: 'openai-codex-native.responses-replay',
+            version: 1,
+            provider: NATIVE_CODEX_PROVIDER,
+            model: 'catalog/model-fast',
+            items: [{ type: 'message', blocks: [0] }],
+          },
+        },
       ])
+      expect(responsesBody).toMatchObject({ model: 'catalog/model', service_tier: 'priority' })
+      expect(responsesHeaders?.get('x-codex-routing-hint'))
+        .toBe('model=catalog/model;tier=priority')
       expect(fetchMock).toHaveBeenCalledTimes(2)
     } finally {
       await authFiber.dispose()
@@ -360,6 +509,41 @@ describe('NativeCodexAdapter catalog boundary', () => {
     })
 
     disposeNative()
+  })
+
+  it('exposes replay state only when the same adapter instance owns history and target', async () => {
+    class SeeingAdapter extends LlmAdapter {
+      readonly seen: unknown[] = []
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const source = options.messages[0]?.source
+        this.seen.push(source?.kind === 'model' ? source.replayState : undefined)
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+    const shared = new SeeingAdapter()
+    const foreign = new SeeingAdapter()
+    const disposeShared = ctx.llm.registerAdapter(['source-route', 'same-target'], shared)
+    const disposeForeign = ctx.llm.registerAdapter(['foreign-target'], foreign)
+    const message = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'durable' }],
+      source: {
+        kind: 'model', provider: 'source-route', model: 'model',
+        replayState: { opaque: 'same-adapter-only' },
+      },
+    } as unknown as GenerateOptions['messages'][number]
+
+    await collect(ctx.llm.stream({
+      provider: 'same-target', model: 'model', messages: [message],
+    }))
+    await collect(ctx.llm.stream({
+      provider: 'foreign-target', model: 'model', messages: [message],
+    }))
+    expect(shared.seen).toEqual([{ opaque: 'same-adapter-only' }])
+    expect(foreign.seen).toEqual([undefined])
+
+    disposeForeign()
+    disposeShared()
   })
 
   it('throws runtime LlmError instances for unconfigured and pre-aborted calls', async () => {
