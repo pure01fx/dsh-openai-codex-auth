@@ -10,6 +10,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import OpenAICodexAuth from '../src/index.ts'
+import type { NativeCodexModel } from '../src/catalog.ts'
 import {
   NATIVE_CODEX_PROVIDER,
   NativeCodexAdapter,
@@ -18,10 +19,15 @@ import {
 const PI_CODEX_PROVIDER = 'openai-codex'
 
 class RegistrationCredentials {
-  async resolve() { return undefined }
-  async describe() { return { configured: false, writable: true } }
-  async set() {}
-  async unset() {}
+  value: string | undefined
+
+  async resolve() {
+    return this.value === undefined ? undefined : { value: this.value, source: 'env' }
+  }
+
+  async describe() { return { configured: this.value !== undefined, source: 'env', writable: false } }
+  async set(_ref: unknown, value: string) { this.value = value }
+  async unset() { this.value = undefined }
 }
 
 class RegistrationWebServer {
@@ -46,6 +52,14 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   return chunks
 }
 
+function accessToken(accountId: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')
+  const body = Buffer.from(JSON.stringify({
+    'https://api.openai.com/auth': { chatgpt_account_id: accountId },
+  })).toString('base64url')
+  return `${header}.${body}.signature`
+}
+
 function request(
   provider = NATIVE_CODEX_PROVIDER,
   signal?: AbortSignal,
@@ -58,7 +72,7 @@ function request(
   }
 }
 
-describe('NativeCodexAdapter M1 skeleton', () => {
+describe('NativeCodexAdapter catalog boundary', () => {
   let ctx: Context
   let runtimeFiber: Fiber
 
@@ -69,6 +83,7 @@ describe('NativeCodexAdapter M1 skeleton', () => {
   })
 
   afterEach(async () => {
+    vi.unstubAllGlobals()
     await runtimeFiber.dispose()
   })
 
@@ -90,11 +105,135 @@ describe('NativeCodexAdapter M1 skeleton', () => {
     )
   })
 
-  it('registers the experimental route through the opt-in auth plugin config', async () => {
+  it('maps visible catalog order and exact hidden-model capabilities', async () => {
+    const models: NativeCodexModel[] = [
+      {
+        slug: 'hidden/model',
+        displayName: 'Hidden Model',
+        description: 'resolvable but not picker-visible',
+        defaultReasoningLevel: 'xhigh',
+        supportedReasoningLevels: [
+          { effort: 'low', description: 'Low effort' },
+          { effort: 'xhigh', description: 'Maximum effort' },
+          { effort: 'xhigh', description: 'duplicate ignored' },
+          { effort: 'future' },
+        ],
+        visibility: 'hide',
+        supportedInApi: false,
+        priority: 0,
+        additionalSpeedTiers: ['fast'],
+        serviceTiers: [{ id: 'priority', name: 'Fast' }],
+        defaultServiceTier: 'default',
+        contextWindow: 272000,
+        inputModalities: ['audio', 'image', 'text'],
+      },
+      {
+        slug: 'visible/later',
+        displayName: 'Visible Later',
+        defaultReasoningLevel: 'high',
+        supportedReasoningLevels: [{ effort: 'low' }],
+        visibility: 'list',
+        supportedInApi: true,
+        priority: 2,
+        additionalSpeedTiers: [],
+        serviceTiers: [],
+        inputModalities: [],
+      },
+      {
+        slug: 'visible/first',
+        displayName: 'Visible First',
+        description: 'first by priority even when API-hidden',
+        supportedReasoningLevels: [],
+        visibility: 'list',
+        supportedInApi: false,
+        priority: 1,
+        additionalSpeedTiers: [],
+        serviceTiers: [],
+        inputModalities: ['text'],
+      },
+      {
+        slug: 'none/model',
+        displayName: 'None Model',
+        supportedReasoningLevels: [],
+        visibility: 'none',
+        supportedInApi: true,
+        priority: -1,
+        additionalSpeedTiers: [],
+        serviceTiers: [],
+        inputModalities: ['text'],
+      },
+    ]
+    const catalog = { list: vi.fn(async () => models), etag: () => 'fixture-etag' }
+    const adapter = new NativeCodexAdapter(catalog)
+
+    expect(await adapter.listModels(NATIVE_CODEX_PROVIDER)).toEqual([
+      {
+        provider: NATIVE_CODEX_PROVIDER,
+        id: 'visible/first',
+        name: 'Visible First',
+        description: 'first by priority even when API-hidden',
+        inputModalities: ['text'],
+      },
+      {
+        provider: NATIVE_CODEX_PROVIDER,
+        id: 'visible/later',
+        name: 'Visible Later',
+        inputModalities: [],
+      },
+    ])
+    expect(await adapter.resolveModel(NATIVE_CODEX_PROVIDER, 'hidden/model')).toEqual({
+      provider: NATIVE_CODEX_PROVIDER,
+      id: 'hidden/model',
+      name: 'Hidden Model',
+      description: 'resolvable but not picker-visible',
+      inputModalities: ['image', 'text'],
+      context: { contextWindow: 272000 },
+      reasoning: {
+        efforts: [
+          { id: 'low', name: 'Low', description: 'Low effort' },
+          { id: 'xhigh', name: 'Extra High', description: 'Maximum effort' },
+          { id: 'future', name: 'future' },
+        ],
+        defaultEffort: 'xhigh',
+      },
+    })
+    expect(await adapter.resolveModel(NATIVE_CODEX_PROVIDER, 'visible/later')).toEqual({
+      provider: NATIVE_CODEX_PROVIDER,
+      id: 'visible/later',
+      name: 'Visible Later',
+      inputModalities: [],
+      reasoning: { efforts: [{ id: 'low', name: 'Low' }] },
+    })
+    expect(await adapter.resolveModel(NATIVE_CODEX_PROVIDER, 'unknown/exact')).toEqual({
+      provider: NATIVE_CODEX_PROVIDER,
+      id: 'unknown/exact',
+      name: 'unknown/exact',
+    })
+    const dispose = ctx.llm.registerAdapter([NATIVE_CODEX_PROVIDER], adapter)
+    await expect(ctx.llm.resolveModelInfo(NATIVE_CODEX_PROVIDER, 'hidden/model')).resolves
+      .toMatchObject({ id: 'hidden/model', reasoning: { defaultEffort: 'xhigh' } })
+    dispose()
+  })
+
+  it('registers the opt-in route and resolves its catalog through external authority', async () => {
     const home = await mkdtemp(join(tmpdir(), 'openai-codex-native-registration-'))
-    ctx.provide('credentials', new RegistrationCredentials() as never)
+    const credentials = new RegistrationCredentials()
+    credentials.value = accessToken('acct_registration')
+    ctx.provide('credentials', credentials as never)
     ctx.provide('webServer', new RegistrationWebServer() as never)
     ctx.provide('webRuntime', { lanAddresses: [], trustedHosts: [] })
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      models: [{
+        slug: 'catalog/model',
+        display_name: 'Catalog Model',
+        supported_reasoning_levels: [],
+        shell_type: 'shell_command',
+        visibility: 'list',
+        priority: 1,
+        supported_in_api: false,
+      }],
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
     const authFiber = await ctx.plugin(OpenAICodexAuth, { dshHome: home, nativeAdapter: true })
     try {
       await vi.waitFor(() => {
@@ -103,6 +242,13 @@ describe('NativeCodexAdapter M1 skeleton', () => {
           name: 'OpenAI Codex (Native, Experimental)',
         })
       })
+      await expect(ctx.llm.listModels(NATIVE_CODEX_PROVIDER)).resolves.toEqual([{
+        provider: NATIVE_CODEX_PROVIDER,
+        id: 'catalog/model',
+        name: 'Catalog Model',
+        inputModalities: ['text', 'image'],
+      }])
+      expect(fetchMock).toHaveBeenCalledTimes(1)
     } finally {
       await authFiber.dispose()
       await rm(home, { recursive: true, force: true })
@@ -179,7 +325,7 @@ describe('NativeCodexAdapter M1 skeleton', () => {
           kind: 'error',
           failure: {
             code: 'NATIVE_TRANSPORT_NOT_READY',
-            message: 'native Codex transport is not implemented in M1',
+            message: 'native Codex transport is not implemented before M3',
           },
         },
       },

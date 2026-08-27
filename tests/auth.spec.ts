@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -473,7 +474,106 @@ describe('OpenAICodexAuth routes', () => {
     harness.credentials.value = accessToken('acct_shadow')
     await expect(harness.root.openaiCodexAuth.bearerToken())
       .rejects.toThrow('does not match the managed OpenAI credential')
+    const nativeError = await (harness.root.openaiCodexAuth as any)
+      .resolveNativeCredential().catch((error: unknown) => error)
+    expect(nativeError).toBeInstanceOf(LlmError)
+    expect(nativeError).toMatchObject({ code: 'INVALID_CREDENTIAL' })
+    expect(harness.credentials.value).not.toBe(managed.access)
     expect(await readCredential(harness.home)).toEqual(managed)
+  })
+
+  it('resolves one coherent managed credential snapshot for native calls', async () => {
+    harness = await createHarness()
+    const service = harness.root.openaiCodexAuth as any
+    await harness.fiber.dispose()
+    const managed: OpenAICodexCredential = {
+      access: accessToken('acct_managed'),
+      refresh: 'refresh-managed',
+      expires: Date.now() + 3_600_000,
+      accountId: 'acct_managed',
+    }
+    await writeCredential(harness.home, managed)
+
+    await expect(service.resolveNativeCredential()).resolves.toEqual({
+      accessToken: managed.access,
+      accountId: managed.accountId,
+    })
+    expect(harness.credentials.value).toBe(managed.access)
+  })
+
+  it('re-resolves external native authority per operation without importing it into managed state', async () => {
+    harness = await createHarness()
+    const service = harness.root.openaiCodexAuth as any
+    await harness.fiber.dispose()
+    const setSpy = vi.spyOn(harness.credentials, 'set')
+    const unsetSpy = vi.spyOn(harness.credentials, 'unset')
+    harness.credentials.value = accessToken('acct_external_one')
+    harness.credentials.source = 'env'
+    harness.credentials.writable = false
+
+    await expect(service.resolveNativeCredential()).resolves.toEqual({
+      accessToken: harness.credentials.value,
+      accountId: 'acct_external_one',
+    })
+    harness.credentials.value = accessToken('acct_external_two')
+    await expect(service.resolveNativeCredential()).resolves.toEqual({
+      accessToken: harness.credentials.value,
+      accountId: 'acct_external_two',
+    })
+    expect(setSpy).not.toHaveBeenCalled()
+    expect(unsetSpy).not.toHaveBeenCalled()
+    await expect(readFile(join(harness.home, 'openai-codex-auth.json'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('returns sanitized typed failures for missing, invalid, expired, and cancelled native credentials', async () => {
+    harness = await createHarness()
+    const service = harness.root.openaiCodexAuth as any
+    await harness.fiber.dispose()
+
+    const missing = await service.resolveNativeCredential().catch((error: unknown) => error)
+    expect(missing).toBeInstanceOf(LlmError)
+    expect(missing).toMatchObject({ code: 'MISSING_CREDENTIAL' })
+
+    const invalidToken = 'not-a-jwt-secret'
+    harness.credentials.value = invalidToken
+    const invalid = await service.resolveNativeCredential().catch((error: unknown) => error)
+    expect(invalid).toBeInstanceOf(LlmError)
+    expect(invalid).toMatchObject({ code: 'INVALID_CREDENTIAL' })
+    expect(String((invalid as Error).message)).not.toContain(invalidToken)
+
+    harness.credentials.value = accessToken('acct_expired', Date.now() - 60_000)
+    const expired = await service.resolveNativeCredential().catch((error: unknown) => error)
+    expect(expired).toBeInstanceOf(LlmError)
+    expect(expired).toMatchObject({ code: 'INVALID_CREDENTIAL' })
+
+    const controller = new AbortController()
+    controller.abort()
+    const aborted = await service.resolveNativeCredential(controller.signal).catch((error: unknown) => error)
+    expect(aborted).toBeInstanceOf(LlmError)
+    expect(aborted).toMatchObject({ code: 'ABORTED' })
+  })
+
+  it('does not return external authority after cancellation during credential resolution', async () => {
+    harness = await createHarness()
+    const service = harness.root.openaiCodexAuth as any
+    await harness.fiber.dispose()
+    let releaseResolve!: () => void
+    const gate = new Promise<void>((resolve) => { releaseResolve = resolve })
+    const external = accessToken('acct_external')
+    vi.spyOn(harness.credentials, 'resolve').mockImplementationOnce(async () => {
+      await gate
+      return { value: external, source: 'env' }
+    })
+    const controller = new AbortController()
+    const pending = service.resolveNativeCredential(controller.signal) as Promise<unknown>
+    await vi.waitFor(() => expect(harness!.credentials.resolve).toHaveBeenCalledTimes(1))
+    controller.abort()
+    releaseResolve()
+
+    await expect(pending).rejects.toMatchObject({ code: 'ABORTED' })
+    await expect(readFile(join(harness.home, 'openai-codex-auth.json'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('refreshes usage after a Codex turn and on explicit status refresh without idle polling', async () => {

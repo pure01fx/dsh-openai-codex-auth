@@ -111,8 +111,10 @@ export declare class OpenAICodexAuth extends Service {
     private publicationChangedError;
     private failAfterPublicationRollback;
     private commitCredential;
-    /** Return a valid bearer token, refreshing and persisting it when near expiry. */
+    private resolveManagedCredentialLocked;
+    /** Return a valid managed bearer token, refreshing and persisting it when near expiry. */
     bearerToken(signal?: AbortSignal): Promise<string | undefined>;
+    private resolveNativeCredential;
     private finishCredential;
     private finishAuthorizationCode;
     private settleFlow;

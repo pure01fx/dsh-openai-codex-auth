@@ -1,12 +1,12 @@
-/** Experimental native Codex adapter seam; transport arrives in M3. */
+/** Experimental native Codex adapter; HTTP transport arrives in M3. */
 import { LlmAdapter, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { NativeCodexModelCatalog } from './catalog.js';
 /** Provider route reserved for the package-owned native Codex adapter. */
 export declare const NATIVE_CODEX_PROVIDER = "openai-codex-native";
-/**
- * M1 registration and metadata skeleton for the native Codex route.
- * HTTP request serialization and streaming transport intentionally belong to M3.
- */
+/** Package-owned DSH adapter with live catalog metadata and an M3 transport boundary. */
 export declare class NativeCodexAdapter extends LlmAdapter {
+    private readonly catalog?;
+    constructor(catalog?: NativeCodexModelCatalog | undefined);
     private assertProvider;
     private assertNotAborted;
     providerInfo(provider: string): LlmProviderInfo;

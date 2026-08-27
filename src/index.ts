@@ -11,7 +11,9 @@ import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import { createHash, randomBytes } from 'node:crypto'
 import { readFile, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import { INVALID_CREDENTIAL_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import { NATIVE_CODEX_PROVIDER, NativeCodexAdapter } from './native-adapter.js'
+import { NativeCodexCatalog, type NativeCodexCredential } from './catalog.js'
 
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 const AUTH_BASE_URL = 'https://auth.openai.com'
@@ -168,12 +170,12 @@ function jwtPayload(token: string, label: string): Record<string, unknown> {
   }
 }
 
-function accountId(idToken: string): string {
-  const auth = jwtPayload(idToken, 'ID token')['https://api.openai.com/auth']
+function chatGptAccountId(token: string, label: string): string {
+  const auth = jwtPayload(token, label)['https://api.openai.com/auth']
   const id = auth !== null && typeof auth === 'object'
     ? (auth as Record<string, unknown>).chatgpt_account_id
     : undefined
-  if (typeof id !== 'string' || id.length === 0) throw new Error('OpenAI ID token has no ChatGPT account id')
+  if (typeof id !== 'string' || id.length === 0) throw new Error(`OpenAI ${label} has no ChatGPT account id`)
   return id
 }
 
@@ -200,7 +202,7 @@ function parseTokenResponse(value: TokenResponse | null, previous?: OpenAICodexC
   }
   const resolvedAccountId = idToken === undefined
     ? previous?.accountId
-    : accountId(idToken)
+    : chatGptAccountId(idToken, 'ID token')
   if (resolvedAccountId === undefined) throw new Error('OpenAI token response has no ID token')
   return { access: value.access_token, refresh, expires, accountId: resolvedAccountId }
 }
@@ -693,8 +695,12 @@ export class OpenAICodexAuth extends Service {
     super(ctx, 'openaiCodexAuth')
     this.filename = resolve(config.path ?? join(resolveDshHome(config.dshHome), DEFAULT_FILENAME))
     if (config.nativeAdapter) {
+      const catalog = new NativeCodexCatalog({
+        resolveCredential: signal => this.resolveNativeCredential(signal),
+        warn: message => { ctx.logger.warn(message) },
+      })
       ctx.inject(['llm'], (llmCtx) => {
-        llmCtx.llm.registerAdapter([NATIVE_CODEX_PROVIDER], new NativeCodexAdapter())
+        llmCtx.llm.registerAdapter([NATIVE_CODEX_PROVIDER], new NativeCodexAdapter(catalog))
       })
     }
     ctx.effect(async () => {
@@ -903,34 +909,90 @@ export class OpenAICodexAuth extends Service {
     }
   }
 
-  /** Return a valid bearer token, refreshing and persisting it when near expiry. */
+  private async resolveManagedCredentialLocked(
+    signal?: AbortSignal,
+  ): Promise<OpenAICodexCredential | undefined> {
+    throwIfCancelled(signal)
+    const current = await readCredential(this.filename)
+    throwIfCancelled(signal)
+    if (current === undefined) return undefined
+    if (current.expires > Date.now() + TOKEN_REFRESH_PREEMPT_MS) {
+      await this.publishCredentialToken(current.access, signal)
+      return current
+    }
+    await this.assertCredentialWritable()
+    let next: OpenAICodexCredential
+    try {
+      next = await refreshToken(current, signal)
+    } catch (error) {
+      throwIfCancelled(signal)
+      if (!isPermanentRefreshError(error) && current.expires > Date.now()) {
+        await this.publishCredentialToken(current.access, signal)
+        return current
+      }
+      throw error
+    }
+    throwIfCancelled(signal)
+    await this.commitCredential(next)
+    return next
+  }
+
+  /** Return a valid managed bearer token, refreshing and persisting it when near expiry. */
   async bearerToken(signal?: AbortSignal): Promise<string | undefined> {
     throwIfCancelled(signal)
     return withFileLock(this.filename, async () => {
-      throwIfCancelled(signal)
-      const current = await readCredential(this.filename)
-      throwIfCancelled(signal)
-      if (current === undefined) return undefined
-      if (current.expires > Date.now() + TOKEN_REFRESH_PREEMPT_MS) {
-        await this.publishCredentialToken(current.access, signal)
-        return current.access
-      }
-      await this.assertCredentialWritable()
-      let next: OpenAICodexCredential
-      try {
-        next = await refreshToken(current, signal)
-      } catch (error) {
-        throwIfCancelled(signal)
-        if (!isPermanentRefreshError(error) && current.expires > Date.now()) {
-          await this.publishCredentialToken(current.access, signal)
-          return current.access
-        }
-        throw error
-      }
-      throwIfCancelled(signal)
-      await this.commitCredential(next)
-      return next.access
+      const credential = await this.resolveManagedCredentialLocked(signal)
+      return credential?.access
     })
+  }
+
+  private async resolveNativeCredential(signal?: AbortSignal): Promise<NativeCodexCredential> {
+    try {
+      throwIfCancelled(signal)
+      return await withFileLock(this.filename, async () => {
+        throwIfCancelled(signal)
+        const managed = await this.resolveManagedCredentialLocked(signal)
+        if (managed !== undefined) {
+          throwIfCancelled(signal)
+          return { accessToken: managed.access, accountId: managed.accountId }
+        }
+        const external = await this.ctx.credentials.resolve(TOKEN_REF)
+        throwIfCancelled(signal)
+        if (external === undefined) {
+          throw new LlmError('native Codex credential is not configured', 'MISSING_CREDENTIAL')
+        }
+        let accountId: string
+        let expires: number | undefined
+        try {
+          accountId = chatGptAccountId(external.value, 'access token')
+          expires = accessTokenExpiry(external.value)
+        } catch (error) {
+          throw new LlmError(
+            'native Codex credential is not a valid ChatGPT access token',
+            INVALID_CREDENTIAL_CODE,
+            { cause: error },
+          )
+        }
+        if (expires !== undefined && expires <= Date.now()) {
+          throw new LlmError(
+            'native Codex ChatGPT access token has expired',
+            INVALID_CREDENTIAL_CODE,
+          )
+        }
+        throwIfCancelled(signal)
+        return { accessToken: external.value, accountId }
+      })
+    } catch (error) {
+      if (error instanceof LlmError) throw error
+      if (signal?.aborted) {
+        throw new LlmError('native Codex credential resolution was aborted', 'ABORTED', { cause: error })
+      }
+      throw new LlmError(
+        'native Codex managed credential could not be resolved',
+        INVALID_CREDENTIAL_CODE,
+        { cause: error },
+      )
+    }
   }
 
   private async finishCredential(credential: OpenAICodexCredential, signal: AbortSignal): Promise<void> {

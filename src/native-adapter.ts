@@ -1,22 +1,91 @@
-/** Experimental native Codex adapter seam; transport arrives in M3. */
+/** Experimental native Codex adapter; HTTP transport arrives in M3. */
 import {
   LlmAdapter,
   LlmError,
+  ReasoningEffortId,
   type GenerateOptions,
   type LlmModelInfo,
   type LlmProviderInfo,
   type LlmResolvedModelInfo,
+  type ModelModality,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type {
+  NativeCodexModel,
+  NativeCodexModelCatalog,
+} from './catalog.js'
 
 /** Provider route reserved for the package-owned native Codex adapter. */
 export const NATIVE_CODEX_PROVIDER = 'openai-codex-native'
 
-/**
- * M1 registration and metadata skeleton for the native Codex route.
- * HTTP request serialization and streaming transport intentionally belong to M3.
- */
+function effortName(effort: string): string {
+  switch (effort) {
+    case 'none': return 'None'
+    case 'minimal': return 'Minimal'
+    case 'low': return 'Low'
+    case 'medium': return 'Medium'
+    case 'high': return 'High'
+    case 'xhigh': return 'Extra High'
+    case 'max': return 'Max'
+    case 'ultra': return 'Ultra'
+    case 'persistent': return 'Persistent'
+    default: return effort
+  }
+}
+
+function inputModalities(model: NativeCodexModel): readonly ModelModality[] {
+  return model.inputModalities.filter(
+    (modality): modality is ModelModality => modality === 'text' || modality === 'image',
+  )
+}
+
+function listModel(provider: string, model: NativeCodexModel): LlmModelInfo {
+  const description = model.description
+  return {
+    provider,
+    id: model.slug,
+    name: model.displayName,
+    ...description === undefined ? {} : { description },
+    inputModalities: inputModalities(model),
+  }
+}
+
+function resolvedModel(provider: string, model: NativeCodexModel): LlmResolvedModelInfo {
+  const info: LlmResolvedModelInfo = {
+    ...listModel(provider, model),
+    ...model.contextWindow === undefined ? {} : { context: { contextWindow: model.contextWindow } },
+  }
+  const efforts = []
+  const seen = new Set<string>()
+  for (const level of model.supportedReasoningLevels) {
+    if (seen.has(level.effort)) continue
+    seen.add(level.effort)
+    const id = ReasoningEffortId(level.effort)
+    efforts.push({
+      id,
+      name: effortName(level.effort),
+      ...level.description === undefined ? {} : { description: level.description },
+    })
+  }
+  const defaultEffort = model.defaultReasoningLevel !== undefined
+      && seen.has(model.defaultReasoningLevel)
+    ? ReasoningEffortId(model.defaultReasoningLevel)
+    : undefined
+  if (efforts.length > 0) {
+    info.reasoning = {
+      efforts,
+      ...defaultEffort === undefined ? {} : { defaultEffort },
+    }
+  }
+  return info
+}
+
+/** Package-owned DSH adapter with live catalog metadata and an M3 transport boundary. */
 export class NativeCodexAdapter extends LlmAdapter {
+  constructor(private readonly catalog?: NativeCodexModelCatalog) {
+    super()
+  }
+
   private assertProvider(provider: string): void {
     if (provider !== NATIVE_CODEX_PROVIDER) {
       throw new LlmError(
@@ -39,7 +108,11 @@ export class NativeCodexAdapter extends LlmAdapter {
 
   async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     this.assertProvider(provider)
-    return []
+    const models = await this.catalog?.list() ?? []
+    return models
+      .filter(model => model.visibility === 'list')
+      .sort((left, right) => left.priority - right.priority)
+      .map(model => listModel(provider, model))
   }
 
   async resolveModel(
@@ -49,14 +122,19 @@ export class NativeCodexAdapter extends LlmAdapter {
   ): Promise<LlmResolvedModelInfo> {
     this.assertNotAborted(signal)
     this.assertProvider(provider)
-    return { provider, id: model, name: model }
+    const models = await this.catalog?.list(signal) ?? []
+    this.assertNotAborted(signal)
+    const match = models.find(candidate => candidate.slug === model)
+    return match === undefined
+      ? { provider, id: model, name: model }
+      : resolvedModel(provider, match)
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.assertNotAborted(options.signal)
     this.assertProvider(options.provider)
     throw new LlmError(
-      'native Codex transport is not implemented in M1',
+      'native Codex transport is not implemented before M3',
       'NATIVE_TRANSPORT_NOT_READY',
     )
   }

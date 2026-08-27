@@ -30,6 +30,8 @@
   "files": [
     "lib/index.js",
     "lib/index.d.ts",
+    "lib/catalog.js",
+    "lib/catalog.d.ts",
     "lib/native-adapter.js",
     "lib/native-adapter.d.ts",
     "client.js",

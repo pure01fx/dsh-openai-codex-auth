@@ -1,0 +1,28 @@
+{
+  "models": [
+    {
+      "slug": "gpt-test",
+      "display_name": "gpt-test",
+      "description": "desc",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        { "effort": "low", "description": "low" },
+        { "effort": "medium", "description": "medium" },
+        { "effort": "high", "description": "high" }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "minimal_client_version": [0, 99, 0],
+      "supported_in_api": true,
+      "priority": 1,
+      "upgrade": null,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": null,
+      "truncation_policy": { "mode": "bytes", "limit": 10000 },
+      "supports_image_detail_original": false,
+      "context_window": 272000,
+      "experimental_supported_tools": []
+    }
+  ]
+}
