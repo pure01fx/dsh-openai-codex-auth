@@ -9,7 +9,7 @@ import {
   type NativeCodexCredential,
 } from '../src/catalog.ts'
 
-const FIXTURE = await readFile(new URL('./fixtures/codex-models-d5cacec.json', import.meta.url), 'utf8')
+const FIXTURE = await readFile(new URL('./fixtures/codex-models.json', import.meta.url), 'utf8')
 const CREDENTIAL: NativeCodexCredential = {
   accessToken: 'fixture-secret-token',
   accountId: 'acct_fixture',
@@ -57,6 +57,7 @@ describe('NativeCodexCatalog', () => {
           { effort: 'medium', description: 'medium' },
           { effort: 'high', description: 'high' },
         ],
+        multiAgentReasoningEffort: 'high',
         visibility: 'list',
         supportedInApi: true,
         priority: 1,
@@ -73,6 +74,7 @@ describe('NativeCodexCatalog', () => {
       'https://chatgpt.com/backend-api/codex/models?client_version=' + CODEX_CLIENT_VERSION,
     )
     expect(init?.method).toBe('GET')
+    expect(init?.redirect).toBe('error')
     const headers = new Headers(init?.headers)
     expect(Object.fromEntries(headers.entries())).toMatchObject({
       authorization: 'Bearer ' + CREDENTIAL.accessToken,

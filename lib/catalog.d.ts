@@ -1,6 +1,5 @@
+export { CODEX_CLIENT_VERSION } from './upstream.js';
 export declare const CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models";
-/** Backend-compatible Codex catalog version; the pinned workspace's 0.0.0 is a development placeholder. */
-export declare const CODEX_CLIENT_VERSION = "0.147.0";
 export declare const CODEX_CATALOG_CACHE_TTL_MS: number;
 /** One request-scoped credential for native Codex backend calls. */
 export interface NativeCodexCredential {
@@ -25,6 +24,7 @@ export interface NativeCodexModel {
     description?: string;
     defaultReasoningLevel?: string;
     supportedReasoningLevels: readonly NativeCodexReasoningLevel[];
+    multiAgentReasoningEffort?: string;
     visibility: string;
     supportedInApi: boolean;
     priority: number;

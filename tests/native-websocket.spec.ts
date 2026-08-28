@@ -7,9 +7,14 @@ import {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { NATIVE_CODEX_PROVIDER } from '../src/native-adapter.ts'
+import {
+  NATIVE_CODEX_CONNECTION_FAILED_CODE,
+  NATIVE_CODEX_PROVIDER,
+  NATIVE_CODEX_STREAM_INTERRUPTED_CODE,
+} from '../src/native-adapter.ts'
 import { NativeCodexWebSocketTransport } from '../src/native-websocket.ts'
 import {
+  NodeNativeCodexWebSocketFactory,
   nativeCodexWebSocketUrl,
   type NativeCodexWebSocket,
   type NativeCodexWebSocketConnectOptions,
@@ -84,6 +89,13 @@ function firstRequest(message = createUserMessage({
 }
 function response(body = HTTP_SUCCESS): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+}
+function wrappedNetworkFailure(code: string): LlmError {
+  return new LlmError('managed credential request failed', code, {
+    cause: new TypeError('fetch failed', {
+      cause: Object.assign(new Error('network unavailable'), { code: 'ENETUNREACH' }),
+    }),
+  })
 }
 function finishState(chunks: StreamChunk[]): unknown {
   const finish = chunks.find(chunk => chunk.type === 'finish')
@@ -160,6 +172,154 @@ describe('NativeCodexWebSocketTransport', () => {
     transport.dispose()
   })
 
+  it('drops settled subagent reasoning and tool calls before WebSocket prewarm', async () => {
+    const scripted = socket([
+      completed('resp_warm_settlement'),
+      ...textResponse('resp_settlement', 'msg_settlement', 'ok'),
+    ])
+    const fetchMock = vi.fn(async () => response())
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([scripted]),
+      fetch: fetchMock as typeof fetch,
+    })
+    const messages = [{
+      id: 'message-subagent-settled',
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Background subagent child-session finished.' },
+        { type: 'text', text: 'Its closing message:' },
+        { type: 'reasoning', text: 'private WebSocket relayed reasoning' },
+        {
+          type: 'tool-call', id: 'call_child_websocket_settlement',
+          name: 'child_tool', arguments: '{"scope":"child"}',
+        },
+        { type: 'text', text: 'The focused review is complete.' },
+      ],
+      source: {
+        kind: 'subagent-settled',
+        form: 'notice',
+        summary: 'Background subagent child-session finished.',
+        senderSessionId: 'child-session',
+      },
+    }, {
+      id: 'message-human-retry',
+      role: 'user',
+      content: [{ type: 'text', text: 'Please continue after the settlement.' }],
+      source: { kind: 'user' },
+    }] as unknown as GenerateOptions['messages']
+
+    await collect(transport.stream({ ...firstRequest(), messages }))
+
+    const [warmup, initial] = scripted.sent.map(text => JSON.parse(text))
+    expect(warmup.input).toEqual([{
+      type: 'message',
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'Background subagent child-session finished.' },
+        { type: 'input_text', text: 'Its closing message:' },
+        { type: 'input_text', text: 'The focused review is complete.' },
+      ],
+    }, {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Please continue after the settlement.' }],
+    }])
+    expect(JSON.stringify(scripted.sent)).not.toContain('private WebSocket relayed reasoning')
+    expect(JSON.stringify(scripted.sent)).not.toContain('call_child_websocket_settlement')
+    expect(initial).toMatchObject({ previous_response_id: 'resp_warm_settlement', input: [] })
+    expect(fetchMock).not.toHaveBeenCalled()
+    transport.dispose()
+  })
+
+  it('prewarms histories with more than 2048 input items', async () => {
+    const scripted = socket([
+      completed('resp_warm_large'),
+      ...textResponse('resp_large', 'msg_large', 'ok'),
+    ])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([scripted]),
+    })
+    const messages = Array.from({ length: 2049 }, (_, index) => createUserMessage({
+      content: [{ type: 'text', text: String(index) }], source: { kind: 'user' },
+    }))
+
+    await collect(transport.stream({ ...firstRequest(), messages }))
+
+    const [warmup, initial] = scripted.sent.map(text => JSON.parse(text))
+    expect(warmup.input).toHaveLength(2049)
+    expect(initial).toMatchObject({
+      previous_response_id: 'resp_warm_large', input: [],
+    })
+  })
+
+  it('publishes subscription quota from codex.rate_limits events', async () => {
+    const quota = vi.fn()
+    const scripted = socket([
+      completed('resp_warm'),
+      JSON.stringify({
+        type: 'codex.rate_limits',
+        plan_type: 'plus',
+        rate_limits: {
+          limit_reached: false,
+          primary: { used_percent: 42, window_minutes: 300, reset_at: 1_700_000_000 },
+          secondary: null,
+        },
+        credits: { has_credits: true, unlimited: false, balance: '123' },
+      }),
+      ...textResponse('resp_one', 'msg_one', 'ok'),
+    ])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([scripted]),
+      fetch: vi.fn(async () => response()) as typeof fetch,
+      onRateLimits: quota,
+    })
+
+    await collect(transport.stream(firstRequest()))
+    expect(quota).toHaveBeenCalledWith({
+      accountId: 'synthetic-account',
+      updates: [{
+        limitId: 'codex',
+        planType: 'plus',
+        primary: { usedPercent: 42, windowSeconds: 18_000, resetAt: 1_700_000_000 },
+        secondary: null,
+        limitReached: false,
+        credits: { hasCredits: true, unlimited: false, balance: '123' },
+      }],
+    })
+  })
+
+  it('publishes exact response usage metadata over WebSocket', async () => {
+    const usage = vi.fn()
+    const responseEvents = textResponse('resp_one', 'msg_one', 'ok')
+    responseEvents[responseEvents.length - 1] = JSON.stringify({
+      type: 'response.completed',
+      response: {
+        id: 'resp_one',
+        usage_metadata: { amount: '0.12345678901234567890' },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    })
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([socket([
+        completed('resp_warm'),
+        ...responseEvents,
+      ])]),
+      fetch: vi.fn(async () => response()) as typeof fetch,
+      onResponseUsage: usage,
+    })
+
+    await collect(transport.stream(firstRequest()))
+
+    expect(usage).toHaveBeenCalledWith({
+      accountId: CREDENTIAL.accountId,
+      metadata: { amount: '0.12345678901234567890' },
+    })
+  })
+
   it('reconnects with a full create without repeating prewarm', async () => {
     const closed = new ScriptedSocket([{ type: 'close', code: 1011, reason: 'retry' }])
     const recovered = socket(textResponse('resp_success', 'msg_success', 'ok'))
@@ -170,6 +330,7 @@ describe('NativeCodexWebSocketTransport', () => {
       webSocketFactory: factory,
       fetch: fetchMock as typeof fetch,
       maxWebSocketReconnects: 1,
+      sleep: async () => {},
     })
 
     await expect(collect(transport.stream(firstRequest()))).resolves.toEqual(
@@ -182,6 +343,201 @@ describe('NativeCodexWebSocketTransport', () => {
     expect(JSON.parse(recovered.sent[0]!)).not.toHaveProperty('generate')
     expect(JSON.parse(recovered.sent[0]!)).not.toHaveProperty('previous_response_id')
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('waits through a half-minute network outage without consuming reconnects', async () => {
+    const delays: number[] = []
+    const warn = vi.fn()
+    const recovered = socket([
+      completed('resp_warm_network'),
+      ...textResponse('resp_network', 'msg_network', 'back'),
+    ])
+    const factory = new ScriptedFactory([
+      new LlmError('offline one', NATIVE_CODEX_CONNECTION_FAILED_CODE),
+      new LlmError('offline two', NATIVE_CODEX_CONNECTION_FAILED_CODE),
+      new LlmError('offline three', NATIVE_CODEX_CONNECTION_FAILED_CODE),
+      new LlmError('offline four', NATIVE_CODEX_CONNECTION_FAILED_CODE),
+      new LlmError('offline five', NATIVE_CODEX_CONNECTION_FAILED_CODE),
+      new LlmError('offline six', NATIVE_CODEX_CONNECTION_FAILED_CODE),
+      recovered,
+    ])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: factory,
+      maxWebSocketReconnects: 0,
+      sleep: async delay => { delays.push(delay) },
+      warn,
+    })
+
+    await expect(collect(transport.stream(firstRequest()))).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'finish' })]),
+    )
+
+    expect(factory.options).toHaveLength(7)
+    expect(delays).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000])
+    expect(warn).toHaveBeenCalledTimes(6)
+  })
+
+  it('cancels promptly while waiting for WebSocket network recovery', async () => {
+    const controller = new AbortController()
+    const factory = new ScriptedFactory([
+      new LlmError('offline', NATIVE_CODEX_CONNECTION_FAILED_CODE),
+    ])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: factory,
+      maxWebSocketReconnects: 0,
+    })
+    const pending = collect(transport.stream({
+      ...firstRequest(), signal: controller.signal,
+    }))
+    await vi.waitFor(() => expect(factory.options).toHaveLength(1))
+    controller.abort()
+
+    await expect(pending).rejects.toMatchObject({ code: 'ABORTED' })
+    expect(factory.options).toHaveLength(1)
+  })
+
+  it('preserves DISPOSED while stopping a WebSocket network recovery wait', async () => {
+    const factory = new ScriptedFactory([
+      new LlmError('offline', NATIVE_CODEX_CONNECTION_FAILED_CODE),
+    ])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: factory,
+      maxWebSocketReconnects: 0,
+    })
+    const pending = collect(transport.stream(firstRequest()))
+    await vi.waitFor(() => expect(factory.options).toHaveLength(1))
+    transport.dispose()
+
+    await expect(pending).rejects.toMatchObject({ code: 'DISPOSED' })
+    expect(factory.options).toHaveLength(1)
+  })
+
+  it('waits for wrapped credential resolution outages without using reconnects', async () => {
+    let resolutions = 0
+    const resolveCredential = vi.fn(async () => {
+      if (resolutions++ < 2) throw wrappedNetworkFailure('INVALID_CREDENTIAL')
+      return CREDENTIAL
+    })
+    const recovered = socket([
+      completed('resp_warm_resolved'),
+      ...textResponse('resp_resolved', 'msg_resolved', 'back'),
+    ])
+    const factory = new ScriptedFactory([recovered])
+    const delays: number[] = []
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential,
+      webSocketFactory: factory,
+      maxWebSocketReconnects: 0,
+      sleep: async delay => { delays.push(delay) },
+    })
+
+    await collect(transport.stream(firstRequest()))
+
+    expect(resolveCredential).toHaveBeenCalledTimes(3)
+    expect(factory.options).toHaveLength(1)
+    expect(delays).toEqual([5_000, 10_000])
+  })
+
+  it('retries wrapped credential recovery outages without falling back', async () => {
+    const recovered = socket([
+      completed('resp_warm_recovered'),
+      ...textResponse('resp_recovered', 'msg_recovered', 'back'),
+    ])
+    const factory = new ScriptedFactory([
+      new LlmError('unauthorized one', 'WS_AUTH'),
+      new LlmError('unauthorized two', 'WS_AUTH'),
+      recovered,
+    ])
+    let recoveries = 0
+    const recoverCredential = vi.fn(async () => {
+      if (recoveries++ === 0) throw wrappedNetworkFailure('AUTH')
+      return true
+    })
+    const fetchMock = vi.fn(async () => response())
+    const delays: number[] = []
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      recoverCredential,
+      webSocketFactory: factory,
+      fetch: fetchMock as typeof fetch,
+      maxWebSocketReconnects: 0,
+      sleep: async delay => { delays.push(delay) },
+    })
+
+    await collect(transport.stream(firstRequest()))
+
+    expect(recoverCredential).toHaveBeenCalledTimes(2)
+    expect(factory.options).toHaveLength(3)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(delays).toEqual([5_000])
+  })
+
+  it('preserves DISPOSED while credential recovery is pending', async () => {
+    const recoverCredential = vi.fn((_previous, signal?: AbortSignal) =>
+      new Promise<boolean>((_resolve, reject) => {
+        const abort = (): void => { reject(signal?.reason ?? new Error('aborted')) }
+        if (signal?.aborted) abort()
+        else signal?.addEventListener('abort', abort, { once: true })
+      }))
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      recoverCredential,
+      webSocketFactory: new ScriptedFactory([new LlmError('unauthorized', 'WS_AUTH')]),
+    })
+    const pending = collect(transport.stream(firstRequest()))
+    await vi.waitFor(() => expect(recoverCredential).toHaveBeenCalledTimes(1))
+
+    transport.dispose()
+
+    await expect(pending).rejects.toMatchObject({ code: 'DISPOSED' })
+  })
+
+  it('preserves DISPOSED through a pending HTTP fallback', async () => {
+    const fetchMock = vi.fn((_input: URL | RequestInfo, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const abort = (): void => { reject(init?.signal?.reason ?? new Error('aborted')) }
+        if (init?.signal?.aborted) abort()
+        else init?.signal?.addEventListener('abort', abort, { once: true })
+      }))
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([
+        new LlmError('upgrade unavailable', 'WS_UPGRADE_REQUIRED'),
+      ]),
+      fetch: fetchMock as typeof fetch,
+      maxWebSocketReconnects: 0,
+    })
+    const pending = collect(transport.stream(firstRequest()))
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    transport.dispose()
+
+    await expect(pending).rejects.toMatchObject({ code: 'DISPOSED' })
+  })
+
+  it('backs off reconnects and honors bounded provider retry delays', async () => {
+    const delays: number[] = []
+    const factory = new ScriptedFactory([
+      new LlmError('retry later', 'WS_RETRYABLE', { providerRetryAfterMs: 2_000 }),
+      socket(textResponse('resp_success', 'msg_success', 'ok')),
+    ])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: factory,
+      maxWebSocketReconnects: 1,
+      initialRetryDelayMs: 200,
+      maxRetryDelayMs: 1_000,
+      random: () => 0.5,
+      sleep: async delay => { delays.push(delay) },
+    })
+
+    await collect(transport.stream(firstRequest()))
+
+    expect(factory.options).toHaveLength(2)
+    expect(delays).toEqual([1_000])
   })
 
   it('falls back immediately on 426 and keeps the session on HTTP', async () => {
@@ -223,7 +579,11 @@ describe('NativeCodexWebSocketTransport', () => {
       JSON.stringify({ type: 'response.output_item.done', item: {
         type: 'message', id: 'msg_partial', content: [{ type: 'output_text', text: 'part' }],
       } }),
-      JSON.stringify({ type: 'error', error: { code: 'websocket_connection_limit_reached' } }),
+      JSON.stringify({
+        type: 'error',
+        headers: { 'Retry-After': '30', 'X-Request-Id': 'req-post-output' },
+        error: { code: 'websocket_connection_limit_reached' },
+      }),
     ])
     const secondFetch = vi.fn(async () => response())
     const unsafe = new NativeCodexWebSocketTransport({
@@ -242,7 +602,15 @@ describe('NativeCodexWebSocketTransport', () => {
       { type: 'text-delta', index: 0, text: 'part' },
       { type: 'block-end', index: 0, block: { type: 'text', text: 'part' } },
     ])
-    expect(error).toMatchObject({ code: 'WS_RETRYABLE_RESET' })
+    expect(error).toMatchObject({
+      code: NATIVE_CODEX_STREAM_INTERRUPTED_CODE,
+      failure: {
+        providerRetryAfterMs: 10_000,
+        requestId: 'req-post-output',
+      },
+    })
+    expect((error as Error & { cause?: unknown }).cause)
+      .toMatchObject({ code: 'WS_RETRYABLE_RESET' })
     expect(secondFetch).not.toHaveBeenCalled()
   })
 
@@ -317,22 +685,29 @@ describe('NativeCodexWebSocketTransport', () => {
     expect(JSON.parse(replacement.sent[0]!)).not.toHaveProperty('previous_response_id')
   })
 
-  it('uses one startup prewarm plus two normal reconnects before sticky fallback', async () => {
+  it('uses one startup prewarm plus five normal reconnects before sticky fallback', async () => {
     const factory = new ScriptedFactory([
-      new LlmError('one', 'WS_RETRYABLE'),
-      new LlmError('two', 'WS_RETRYABLE'),
-      new LlmError('three', 'WS_RETRYABLE'),
-      new LlmError('four', 'WS_RETRYABLE'),
+      new LlmError('prewarm', 'WS_RETRYABLE'),
+      new LlmError('initial', 'WS_RETRYABLE'),
+      new LlmError('retry one', 'WS_RETRYABLE'),
+      new LlmError('retry two', 'WS_RETRYABLE'),
+      new LlmError('retry three', 'WS_RETRYABLE'),
+      new LlmError('retry four', 'WS_RETRYABLE'),
+      new LlmError('retry five', 'WS_RETRYABLE'),
     ])
     const fetchMock = vi.fn(async () => response())
+    const delays: number[] = []
     const transport = new NativeCodexWebSocketTransport({
       resolveCredential: async () => CREDENTIAL,
       webSocketFactory: factory,
       fetch: fetchMock as typeof fetch,
+      random: () => 0.5,
+      sleep: async delay => { delays.push(delay) },
     })
     await collect(transport.stream(firstRequest()))
     await collect(transport.stream(firstRequest()))
-    expect(factory.options).toHaveLength(4)
+    expect(factory.options).toHaveLength(7)
+    expect(delays).toEqual([200, 200, 400, 800, 1_600, 3_200])
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
@@ -374,6 +749,7 @@ describe('NativeCodexWebSocketTransport', () => {
       resolveCredential: async () => CREDENTIAL,
       webSocketFactory: factory,
       fetch: fetchMock as typeof fetch,
+      sleep: async () => {},
     })
     await collect(transport.stream(firstRequest()))
     expect(factory.options).toHaveLength(2)
@@ -418,21 +794,36 @@ describe('NativeCodexWebSocketTransport', () => {
       completed('resp_warm'),
       JSON.stringify({
         type: 'error', status_code: 429,
-        headers: { 'Retry-After': '2', 'X-Request-Id': ['req-ws-rate'] },
+        headers: {
+          'Retry-After': '2',
+          'X-Request-Id': ['req-ws-rate'],
+          'X-Codex-Primary-Used-Percent': 100,
+          'X-Codex-Primary-Window-Minutes': 15,
+        },
         error: { message: 'bounded' },
       }),
     ])
     const fetchMock = vi.fn(async () => response())
+    const quota = vi.fn()
     const transport = new NativeCodexWebSocketTransport({
       resolveCredential: async () => CREDENTIAL,
       webSocketFactory: new ScriptedFactory([scripted]),
       fetch: fetchMock as typeof fetch,
+      onRateLimits: quota,
     })
     await expect(collect(transport.stream(firstRequest()))).rejects.toMatchObject({
       code: 'RATE_LIMITED',
       failure: { status: 429, providerRetryAfterMs: 2_000, requestId: 'req-ws-rate' },
     })
     expect(fetchMock).not.toHaveBeenCalled()
+    expect(quota).toHaveBeenCalledWith({
+      accountId: 'synthetic-account',
+      updates: [{
+        limitId: 'codex',
+        primary: { usedPercent: 100, windowSeconds: 900 },
+        limitReached: true,
+      }],
+    })
   })
 
   it('aborts active work and fences all requests after disposal', async () => {
@@ -489,6 +880,18 @@ describe('NativeCodexWebSocketTransport', () => {
       expect(factory.options).toHaveLength(1)
       expect(fetchMock).not.toHaveBeenCalled()
     }
+  })
+
+  it('preserves a structured reason for a pre-aborted socket connection', async () => {
+    const controller = new AbortController()
+    controller.abort(new LlmError('disposed', 'DISPOSED'))
+    const factory = new NodeNativeCodexWebSocketFactory()
+
+    await expect(factory.connect({
+      url: 'https://chatgpt.com/backend-api/codex/responses',
+      headers: {},
+      signal: controller.signal,
+    })).rejects.toMatchObject({ code: 'DISPOSED' })
   })
 
   it('validates endpoint conversion without inventing a subprotocol', () => {

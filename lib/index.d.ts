@@ -3,7 +3,10 @@ import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { type IncomingMessage } from 'node:http';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
+import { CODEX_PROVIDER } from './native-adapter.js';
 export { CODEX_PROVIDER, NATIVE_CODEX_PROVIDER } from './native-adapter.js';
+export { normalizeUsage } from './usage.js';
+export { CODEX_CLIENT_VERSION, TRACKED_CODEX_COMMIT, TRACKED_CODEX_RELEASE, TRACKED_CODEX_REPOSITORY, } from './upstream.js';
 /** Persisted OAuth credential. */
 export interface OpenAICodexCredential {
     access: string;
@@ -19,22 +22,34 @@ export interface Config {
     nativeCompatibilityRoute?: boolean;
     nativeWebSocket?: boolean;
 }
-interface UsageWindow {
-    usedPercent: number;
-    windowSeconds?: number;
-    resetAt?: number;
-}
-interface UsageSummary {
-    planType?: string;
-    primary?: UsageWindow;
-    secondary?: UsageWindow;
-    limitReached?: boolean;
-    resetCredits?: number;
-    fetchedAt: number;
-}
 interface WebRuntimeValues {
     lanAddresses: string[];
     trustedHosts: string[];
+}
+export type CodexRouteOwner = 'native' | 'external' | 'unregistered';
+export type NativeCodexRouteTransport = 'websocket-v2' | 'http-sse';
+/** Host-observed ownership of the production Codex provider route. */
+export interface CodexRouteStatus {
+    provider: typeof CODEX_PROVIDER;
+    owner: CodexRouteOwner;
+    active: boolean;
+    registeredName?: string;
+    transport?: NativeCodexRouteTransport;
+    compatibilityRoute: {
+        configured: boolean;
+        active: boolean;
+    };
+}
+interface NativeRouteConfig {
+    nativeAdapter: boolean;
+    nativeCompatibilityRoute: boolean;
+    nativeWebSocket: boolean;
+}
+interface RouteRuntime {
+    listProviders(): Array<{
+        id: string;
+        name: string;
+    }>;
 }
 interface DeviceAuthorization {
     deviceAuthId: string;
@@ -58,8 +73,6 @@ interface TokenResponse {
     id_token?: unknown;
 }
 declare function parseTokenResponse(value: TokenResponse | null, previous?: OpenAICodexCredential): OpenAICodexCredential;
-/** Reduce the OpenAI response to the stable fields displayed by the Web card. */
-export declare function normalizeUsage(value: unknown): UsageSummary;
 declare function parseAuthority(authority: string | undefined): URL | undefined;
 declare function isLoopbackHostname(hostname: string): boolean;
 declare function isTrustedHost(authority: string | undefined, trustedHosts: readonly string[]): boolean;
@@ -69,6 +82,7 @@ declare function callbackHostMatches(authority: string | undefined, redirectUri:
 declare function startDeviceAuthorization(signal?: AbortSignal): Promise<DeviceAuthorization>;
 declare function parseDevicePollResponse(response: Response): Promise<ParsedDevicePoll>;
 declare function pollDeviceAuthorization(device: DeviceAuthorization, signal?: AbortSignal): Promise<DeviceTokenCode>;
+declare function resolveCodexRouteStatus(config: NativeRouteConfig, llm: RouteRuntime | undefined): CodexRouteStatus;
 export declare const internals: {
     parseTokenResponse: typeof parseTokenResponse;
     parseAuthority: typeof parseAuthority;
@@ -80,6 +94,7 @@ export declare const internals: {
     startDeviceAuthorization: typeof startDeviceAuthorization;
     parseDevicePollResponse: typeof parseDevicePollResponse;
     pollDeviceAuthorization: typeof pollDeviceAuthorization;
+    resolveCodexRouteStatus: typeof resolveCodexRouteStatus;
 };
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -93,17 +108,27 @@ export declare class OpenAICodexAuth extends Service {
     static Config: z<Config>;
     static inject: string[];
     private readonly filename;
+    private readonly routeConfig;
     private readonly csrf;
     private usageCache;
+    private usageAccountId;
+    private responseUsage;
+    private credentialAccountId;
     private usageError;
     private usageRefresh;
     private usageGeneration;
+    private directUsageSequence;
+    private directUsageAccountId;
+    private usageHasDirectDefault;
     private readonly codexTurns;
     private loginFlow;
     private startingDevice;
     private startingBrowser;
     private lastLoginError;
     constructor(ctx: Context, config: Config);
+    private setCredentialAccount;
+    private acceptResponseUsage;
+    private acceptRateLimits;
     private markCodexTurn;
     private consumeCodexTurn;
     private performUsageRefresh;

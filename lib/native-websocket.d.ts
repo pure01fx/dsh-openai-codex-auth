@@ -1,5 +1,5 @@
 import { type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
-import type { NativeCodexTransport, NativeCodexTransportMode } from './native-adapter.js';
+import { type NativeCodexTransport, type NativeCodexTransportMode } from './native-adapter.js';
 import { type NativeCodexHttpOptions } from './native-http.js';
 import { type NativeCodexWebSocketFactory } from './native-websocket-socket.js';
 export interface NativeCodexWebSocketTransportOptions extends NativeCodexHttpOptions {
@@ -23,9 +23,14 @@ export declare class NativeCodexWebSocketTransport implements NativeCodexTranspo
     private readonly maxSessions;
     private readonly sessionIdleMs;
     private readonly maxReconnects;
+    private readonly initialRetryDelayMs;
+    private readonly maxRetryDelayMs;
     private readonly active;
     private disposed;
     constructor(options: NativeCodexWebSocketTransportOptions);
+    private retryDelay;
+    private wait;
+    private waitForConnection;
     private closeEntry;
     private prune;
     private entry;

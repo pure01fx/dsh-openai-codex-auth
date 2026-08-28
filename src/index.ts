@@ -21,6 +21,16 @@ export { CODEX_PROVIDER, NATIVE_CODEX_PROVIDER } from './native-adapter.js'
 import { NativeCodexCatalog, type NativeCodexCredential } from './catalog.js'
 import { NativeCodexHttpTransport, type NativeCodexHttpOptions } from './native-http.js'
 import { NativeCodexWebSocketTransport } from './native-websocket.js'
+import type { CodexRateLimitUpdate } from './rate-limits.js'
+import type { CodexResponseUsageObservation } from './response-usage.js'
+import { mergeDirectUsage, normalizeUsage, type UsageSummary } from './usage.js'
+export { normalizeUsage } from './usage.js'
+export {
+  CODEX_CLIENT_VERSION,
+  TRACKED_CODEX_COMMIT,
+  TRACKED_CODEX_RELEASE,
+  TRACKED_CODEX_REPOSITORY,
+} from './upstream.js'
 
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 const AUTH_BASE_URL = 'https://auth.openai.com'
@@ -64,24 +74,35 @@ export interface Config {
 
 interface Document { version: 1; credential: OpenAICodexCredential }
 
-interface UsageWindow {
-  usedPercent: number
-  windowSeconds?: number
-  resetAt?: number
-}
-
-interface UsageSummary {
-  planType?: string
-  primary?: UsageWindow
-  secondary?: UsageWindow
-  limitReached?: boolean
-  resetCredits?: number
-  fetchedAt: number
-}
-
 interface WebRuntimeValues {
   lanAddresses: string[]
   trustedHosts: string[]
+}
+
+export type CodexRouteOwner = 'native' | 'external' | 'unregistered'
+export type NativeCodexRouteTransport = 'websocket-v2' | 'http-sse'
+
+/** Host-observed ownership of the production Codex provider route. */
+export interface CodexRouteStatus {
+  provider: typeof CODEX_PROVIDER
+  owner: CodexRouteOwner
+  active: boolean
+  registeredName?: string
+  transport?: NativeCodexRouteTransport
+  compatibilityRoute: {
+    configured: boolean
+    active: boolean
+  }
+}
+
+interface NativeRouteConfig {
+  nativeAdapter: boolean
+  nativeCompatibilityRoute: boolean
+  nativeWebSocket: boolean
+}
+
+interface RouteRuntime {
+  listProviders(): Array<{ id: string; name: string }>
 }
 
 interface LoginSuccess { ok: true }
@@ -168,7 +189,9 @@ function messageOf(error: unknown): string {
 }
 
 function throwIfCancelled(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new Error('OpenAI login cancelled')
+  if (!signal?.aborted) return
+  if (signal.reason instanceof LlmError) throw signal.reason
+  throw new Error('OpenAI login cancelled')
 }
 
 function jwtPayload(token: string, label: string): Record<string, unknown> {
@@ -296,7 +319,9 @@ async function tokenRequest(
 ): Promise<OpenAICodexCredential> {
   let response: Response
   try {
-    response = await fetch(TOKEN_URL, { method: 'POST', ...init, ...signal === undefined ? {} : { signal } })
+    response = await fetch(TOKEN_URL, {
+      method: 'POST', redirect: 'error', ...init, ...signal === undefined ? {} : { signal },
+    })
   } catch (error) {
     if (signal?.aborted) throw new Error('OpenAI login cancelled')
     throw error
@@ -328,54 +353,6 @@ function refreshToken(current: OpenAICodexCredential, signal?: AbortSignal): Pro
       refresh_token: current.refresh,
     }),
   }, current, signal)
-}
-
-function optionalNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-function usageWindow(value: unknown): UsageWindow | undefined {
-  if (value === null || typeof value !== 'object') return undefined
-  const row = value as Record<string, unknown>
-  const usedPercent = optionalNumber(row.used_percent ?? row.usedPercent)
-  if (usedPercent === undefined) return undefined
-  const windowSeconds = optionalNumber(row.limit_window_seconds ?? row.windowDurationSecs)
-  const resetAt = optionalNumber(row.reset_at ?? row.resetsAt)
-  return {
-    usedPercent: Math.max(0, Math.min(100, usedPercent)),
-    ...windowSeconds === undefined ? {} : { windowSeconds },
-    ...resetAt === undefined ? {} : { resetAt },
-  }
-}
-
-/** Reduce the OpenAI response to the stable fields displayed by the Web card. */
-export function normalizeUsage(value: unknown): UsageSummary {
-  const root = value !== null && typeof value === 'object' ? value as Record<string, unknown> : {}
-  const limits = root.rate_limit !== null && typeof root.rate_limit === 'object'
-    ? root.rate_limit as Record<string, unknown>
-    : root.rateLimits !== null && typeof root.rateLimits === 'object'
-      ? root.rateLimits as Record<string, unknown>
-      : {}
-  const credits = root.rate_limit_reset_credits !== null && typeof root.rate_limit_reset_credits === 'object'
-    ? root.rate_limit_reset_credits as Record<string, unknown>
-    : undefined
-  const planType = typeof root.plan_type === 'string'
-    ? root.plan_type
-    : typeof root.planType === 'string' ? root.planType : undefined
-  const primary = usageWindow(limits.primary_window ?? limits.primary)
-  const secondary = usageWindow(limits.secondary_window ?? limits.secondary)
-  const limitReached = typeof limits.limit_reached === 'boolean'
-    ? limits.limit_reached
-    : typeof limits.limitReached === 'boolean' ? limits.limitReached : undefined
-  const resetCredits = optionalNumber(credits?.available_count ?? credits?.availableCount)
-  return {
-    ...planType === undefined ? {} : { planType },
-    ...primary === undefined ? {} : { primary },
-    ...secondary === undefined ? {} : { secondary },
-    ...limitReached === undefined ? {} : { limitReached },
-    ...resetCredits === undefined ? {} : { resetCredits },
-    fetchedAt: Date.now(),
-  }
 }
 
 function header(request: IncomingMessage, name: string): string | undefined {
@@ -537,6 +514,7 @@ async function startDeviceAuthorization(signal?: AbortSignal): Promise<DeviceAut
   try {
     response = await fetch(DEVICE_USER_CODE_URL, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ client_id: CLIENT_ID }),
       ...signal === undefined ? {} : { signal },
@@ -644,6 +622,7 @@ async function pollDeviceAuthorization(device: DeviceAuthorization, signal?: Abo
     try {
       response = await fetch(DEVICE_TOKEN_URL, {
         method: 'POST',
+        redirect: 'error',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ device_auth_id: device.deviceAuthId, user_code: device.userCode }),
         ...signal === undefined ? {} : { signal },
@@ -663,6 +642,48 @@ async function pollDeviceAuthorization(device: DeviceAuthorization, signal?: Abo
   throw new Error('OpenAI device-code login timed out')
 }
 
+function resolveCodexRouteStatus(
+  config: NativeRouteConfig,
+  llm: RouteRuntime | undefined,
+): CodexRouteStatus {
+  let providers: Array<{ id: string; name: string }> = []
+  try {
+    providers = llm?.listProviders() ?? []
+  } catch {
+    // The auth/status surface must remain available while the LLM tree is settling.
+  }
+  const production = providers.find(provider => provider.id === CODEX_PROVIDER)
+  const compatibilityActive = providers.some(provider => provider.id === NATIVE_CODEX_PROVIDER)
+  if (config.nativeAdapter) {
+    return {
+      provider: CODEX_PROVIDER,
+      owner: 'native',
+      active: production !== undefined,
+      ...production === undefined ? {} : { registeredName: production.name },
+      transport: config.nativeWebSocket ? 'websocket-v2' : 'http-sse',
+      compatibilityRoute: {
+        configured: config.nativeCompatibilityRoute,
+        active: compatibilityActive,
+      },
+    }
+  }
+  if (production !== undefined) {
+    return {
+      provider: CODEX_PROVIDER,
+      owner: 'external',
+      active: true,
+      registeredName: production.name,
+      compatibilityRoute: { configured: false, active: compatibilityActive },
+    }
+  }
+  return {
+    provider: CODEX_PROVIDER,
+    owner: 'unregistered',
+    active: false,
+    compatibilityRoute: { configured: false, active: compatibilityActive },
+  }
+}
+
 export const internals = {
   parseTokenResponse,
   parseAuthority,
@@ -674,6 +695,7 @@ export const internals = {
   startDeviceAuthorization,
   parseDevicePollResponse,
   pollDeviceAuthorization,
+  resolveCodexRouteStatus,
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -689,18 +711,29 @@ export class OpenAICodexAuth extends Service {
   static Config: z<Config> = z.object({
     path: z.string(),
     dshHome: z.string(),
-    nativeAdapter: z.boolean().default(false),
-    nativeCompatibilityRoute: z.boolean().default(true),
+    nativeAdapter: z.boolean().default(true),
+    nativeCompatibilityRoute: z.boolean().default(false),
     nativeWebSocket: z.boolean().default(true),
   })
   static inject = ['credentials', 'webServer', 'webRuntime']
   private readonly filename: string
+  private readonly routeConfig: NativeRouteConfig
   private readonly csrf = base64Url(randomBytes(24))
   private usageCache: UsageSummary | undefined
+  private usageAccountId: string | undefined
+  private responseUsage: { accountId: string; amount: string; observedAt: number } | undefined
+  private credentialAccountId: string | undefined
   private usageError: string | undefined
-  private usageRefresh: { promise: Promise<void>; queued: boolean } | undefined
+  private usageRefresh: {
+    promise: Promise<void>
+    queued: boolean
+    generation: number | undefined
+  } | undefined
   private usageGeneration = 0
-  private readonly codexTurns = new Map<string, Set<number>>()
+  private directUsageSequence = 0
+  private directUsageAccountId: string | undefined
+  private usageHasDirectDefault = false
+  private readonly codexTurns = new Map<string, Map<number, number>>()
   private loginFlow: LoginFlow | undefined
   private startingDevice: { abort: AbortController; promise: Promise<DeviceLoginFlow> } | undefined
   private startingBrowser: { abort: AbortController; servers: Server[]; promise: Promise<BrowserLoginFlow> } | undefined
@@ -709,7 +742,12 @@ export class OpenAICodexAuth extends Service {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'openaiCodexAuth')
     this.filename = resolve(config.path ?? join(resolveDshHome(config.dshHome), DEFAULT_FILENAME))
-    if (config.nativeAdapter) {
+    this.routeConfig = {
+      nativeAdapter: config.nativeAdapter ?? true,
+      nativeCompatibilityRoute: config.nativeCompatibilityRoute ?? false,
+      nativeWebSocket: config.nativeWebSocket ?? true,
+    }
+    if (this.routeConfig.nativeAdapter) {
       const catalog = new NativeCodexCatalog({
         resolveCredential: signal => this.resolveNativeCredential(signal),
         warn: message => { ctx.logger.warn(message) },
@@ -729,11 +767,17 @@ export class OpenAICodexAuth extends Service {
           }
           return store.readImage(attachment, signal)
         },
+        onRateLimits: observation => {
+          this.acceptRateLimits(observation.accountId, observation.updates)
+        },
+        onResponseUsage: observation => {
+          this.acceptResponseUsage(observation)
+        },
         warn: message => { ctx.logger.warn(message) },
       }
-      const transport = config.nativeWebSocket === false
-        ? new NativeCodexHttpTransport(transportOptions)
-        : new NativeCodexWebSocketTransport(transportOptions)
+      const transport = this.routeConfig.nativeWebSocket
+        ? new NativeCodexWebSocketTransport(transportOptions)
+        : new NativeCodexHttpTransport(transportOptions)
       if (transport instanceof NativeCodexWebSocketTransport) {
         ctx.effect(() => () => { transport.dispose() }, 'openai-codex-auth: dispose native WebSockets')
       }
@@ -741,7 +785,7 @@ export class OpenAICodexAuth extends Service {
         llmCtx.llm.registerAdapter(
           [
             CODEX_PROVIDER,
-            ...(config.nativeCompatibilityRoute === false ? [] : [NATIVE_CODEX_PROVIDER]),
+            ...(this.routeConfig.nativeCompatibilityRoute ? [NATIVE_CODEX_PROVIDER] : []),
           ],
           new NativeCodexAdapter(catalog, transport),
         )
@@ -764,7 +808,9 @@ export class OpenAICodexAuth extends Service {
       return request
     }, { global: true, prepend: true })
     ctx.on('session/event', (session, event) => {
-      if (event.type !== 'turn/end' || !this.consumeCodexTurn(String(session.id), event.data.turn)) return
+      if (event.type !== 'turn/end') return
+      const turn = this.consumeCodexTurn(String(session.id), event.data.turn)
+      if (turn === undefined || turn.receivedDirectUsage) return
       void this.refreshUsage(true)
     }, { global: true })
     ctx.on('agent/disposed', ({ agent }) => {
@@ -815,17 +861,77 @@ export class OpenAICodexAuth extends Service {
     }, 'openai-codex-auth: Web routes')
   }
 
+  private setCredentialAccount(accountId: string | undefined): void {
+    if (this.credentialAccountId !== accountId) {
+      this.directUsageAccountId = undefined
+      this.usageHasDirectDefault = false
+      this.responseUsage = undefined
+    }
+    this.credentialAccountId = accountId
+  }
+
+  private acceptResponseUsage(observation: CodexResponseUsageObservation): void {
+    if (this.credentialAccountId !== undefined
+      && observation.accountId !== this.credentialAccountId) return
+    this.responseUsage = {
+      accountId: observation.accountId,
+      amount: observation.metadata.amount,
+      observedAt: Date.now(),
+    }
+  }
+
+  private acceptRateLimits(
+    accountId: string,
+    updates: readonly CodexRateLimitUpdate[],
+  ): void {
+    if (this.credentialAccountId !== undefined && accountId !== this.credentialAccountId) return
+    const accepted = updates.slice(0, 32)
+    if (accepted.length === 0) return
+    const defaultUpdate = accepted.find(candidate => candidate.limitId === 'codex')
+    const hasDefaultQuota = defaultUpdate !== undefined
+      && (defaultUpdate.primary !== undefined || defaultUpdate.secondary !== undefined)
+    const hasData = accepted.some(update => update.primary !== undefined
+      || update.secondary !== undefined || update.limitReached !== undefined
+      || update.planType !== undefined || update.credits !== undefined)
+    if (!hasData) return
+    const sameUsageAccount = this.usageAccountId === accountId
+    if (!sameUsageAccount) this.usageHasDirectDefault = false
+    if (hasDefaultQuota) this.usageGeneration += 1
+    this.usageCache = mergeDirectUsage(
+      sameUsageAccount ? this.usageCache : undefined,
+      accepted,
+    )
+    this.usageAccountId = accountId
+    this.usageError = undefined
+    if (hasDefaultQuota) {
+      this.directUsageSequence += 1
+      this.directUsageAccountId = accountId
+      this.usageHasDirectDefault = true
+    }
+  }
+
   private markCodexTurn(sessionId: string, turn: number): void {
-    const turns = this.codexTurns.get(sessionId) ?? new Set<number>()
-    turns.add(turn)
+    const turns = this.codexTurns.get(sessionId) ?? new Map<number, number>()
+    turns.set(turn, this.directUsageSequence)
     this.codexTurns.set(sessionId, turns)
   }
 
-  private consumeCodexTurn(sessionId: string, turn: number): boolean {
+  private consumeCodexTurn(
+    sessionId: string,
+    turn: number,
+  ): { receivedDirectUsage: boolean } | undefined {
     const turns = this.codexTurns.get(sessionId)
-    if (turns === undefined || !turns.delete(turn)) return false
+    const directUsageAtStart = turns?.get(turn)
+    if (turns === undefined || directUsageAtStart === undefined) return undefined
+    turns.delete(turn)
     if (turns.size === 0) this.codexTurns.delete(sessionId)
-    return true
+    return {
+      receivedDirectUsage: this.directUsageSequence > directUsageAtStart
+        && this.usageHasDirectDefault
+        && this.directUsageAccountId !== undefined
+        && this.directUsageAccountId === this.credentialAccountId
+        && this.directUsageAccountId === this.usageAccountId,
+    }
   }
 
   private async performUsageRefresh(generation: number): Promise<void> {
@@ -834,6 +940,8 @@ export class OpenAICodexAuth extends Service {
       if (credential === undefined) {
         if (this.usageGeneration === generation) {
           this.usageCache = undefined
+          this.usageAccountId = undefined
+          this.usageHasDirectDefault = false
           this.usageError = undefined
         }
         return
@@ -841,6 +949,8 @@ export class OpenAICodexAuth extends Service {
       const usage = await this.fetchUsage(credential)
       if (this.usageGeneration === generation) {
         this.usageCache = usage
+        this.usageAccountId = credential.accountId
+        this.usageHasDirectDefault = false
         this.usageError = undefined
       }
     } catch (error) {
@@ -854,18 +964,26 @@ export class OpenAICodexAuth extends Service {
       if (queueIfActive) active.queued = true
       return active.promise
     }
-    const cycle: { promise: Promise<void>; queued: boolean } = {
+    const cycle: {
+      promise: Promise<void>
+      queued: boolean
+      generation: number | undefined
+    } = {
       promise: Promise.resolve(),
       queued: false,
+      generation: undefined,
     }
     this.usageRefresh = cycle
     cycle.promise = (async () => {
       try {
         do {
           cycle.queued = false
-          await this.performUsageRefresh(this.usageGeneration)
+          cycle.generation = this.usageGeneration
+          await this.performUsageRefresh(cycle.generation)
+          cycle.generation = undefined
         } while (cycle.queued)
       } finally {
+        cycle.generation = undefined
         if (this.usageRefresh === cycle) this.usageRefresh = undefined
       }
     })()
@@ -959,9 +1077,13 @@ export class OpenAICodexAuth extends Service {
     throwIfCancelled(signal)
     const current = await readCredential(this.filename)
     throwIfCancelled(signal)
-    if (current === undefined) return undefined
+    if (current === undefined) {
+      this.setCredentialAccount(undefined)
+      return undefined
+    }
     if (current.expires > Date.now() + TOKEN_REFRESH_PREEMPT_MS) {
       await this.publishCredentialToken(current.access, signal)
+      this.setCredentialAccount(current.accountId)
       return current
     }
     await this.assertCredentialWritable()
@@ -972,12 +1094,14 @@ export class OpenAICodexAuth extends Service {
       throwIfCancelled(signal)
       if (!isPermanentRefreshError(error) && current.expires > Date.now()) {
         await this.publishCredentialToken(current.access, signal)
+        this.setCredentialAccount(current.accountId)
         return current
       }
       throw error
     }
     throwIfCancelled(signal)
     await this.commitCredential(next)
+    this.setCredentialAccount(next.accountId)
     return next
   }
 
@@ -1029,6 +1153,7 @@ export class OpenAICodexAuth extends Service {
         }
         const credential = this.externalNativeCredential(external.value)
         throwIfCancelled(signal)
+        this.setCredentialAccount(credential.accountId)
         return credential
       })
     } catch (error) {
@@ -1045,7 +1170,10 @@ export class OpenAICodexAuth extends Service {
   }
 
   private nativeRecoveryError(error: unknown): LlmError {
-    const options = error instanceof OAuthEndpointError ? { status: error.status } : undefined
+    const options: ConstructorParameters<typeof LlmError>[2] = {
+      cause: error,
+      ...(error instanceof OAuthEndpointError ? { status: error.status } : {}),
+    }
     if (error instanceof CredentialNotWritableError || isPermanentRefreshError(error)) {
       return new LlmError(
         'native Codex managed credential cannot be refreshed',
@@ -1076,12 +1204,14 @@ export class OpenAICodexAuth extends Service {
           if (external === undefined) return false
           const credential = this.externalNativeCredential(external.value)
           throwIfCancelled(signal)
+          this.setCredentialAccount(credential.accountId)
           return credential.accessToken !== previous.accessToken
             || credential.accountId !== previous.accountId
         }
         if (current.access !== previous.accessToken || current.accountId !== previous.accountId) {
           await this.publishCredentialToken(current.access, signal)
           throwIfCancelled(signal)
+          this.setCredentialAccount(current.accountId)
           return true
         }
         await this.assertCredentialWritable()
@@ -1090,6 +1220,7 @@ export class OpenAICodexAuth extends Service {
         throwIfCancelled(signal)
         await this.commitCredential(next)
         throwIfCancelled(signal)
+        this.setCredentialAccount(next.accountId)
         return next.access !== previous.accessToken || next.accountId !== previous.accountId
       })
     } catch (error) {
@@ -1107,9 +1238,13 @@ export class OpenAICodexAuth extends Service {
     await withFileLock(this.filename, async () => {
       throwIfCancelled(signal)
       await this.commitCredential(credential)
+      this.setCredentialAccount(credential.accountId)
       this.usageGeneration += 1
       if (this.usageRefresh !== undefined) this.usageRefresh.queued = true
       this.usageCache = undefined
+      this.usageAccountId = undefined
+      this.directUsageAccountId = undefined
+      this.usageHasDirectDefault = false
       this.usageError = undefined
     })
     this.lastLoginError = undefined
@@ -1353,9 +1488,13 @@ export class OpenAICodexAuth extends Service {
         }
       }
     })
+    this.setCredentialAccount(undefined)
     this.usageGeneration += 1
     if (this.usageRefresh !== undefined) this.usageRefresh.queued = false
     this.usageCache = undefined
+    this.usageAccountId = undefined
+    this.directUsageAccountId = undefined
+    this.usageHasDirectDefault = false
     this.usageError = undefined
     this.lastLoginError = undefined
   }
@@ -1376,7 +1515,13 @@ export class OpenAICodexAuth extends Service {
         this.usageError = messageOf(error)
       }
       if (refresh) await this.refreshUsage(true)
-      else if (this.usageRefresh !== undefined) await this.usageRefresh.promise
+      else if (this.usageRefresh !== undefined
+        && !(this.usageRefresh.generation !== undefined
+          && this.usageRefresh.generation !== this.usageGeneration
+          && this.usageCache?.source === 'response'
+          && this.usageHasDirectDefault
+          && this.usageAccountId === credential.accountId
+          && this.directUsageAccountId === credential.accountId)) await this.usageRefresh.promise
     }
     const flow = this.loginFlow
     const startingMethod = this.startingDevice !== undefined
@@ -1389,6 +1534,10 @@ export class OpenAICodexAuth extends Service {
       ? { authorizationUrl: flow.url, probeUrl: flow.probeUrl, expiresAt: flow.expiresAt }
       : undefined
     return {
+      route: resolveCodexRouteStatus(
+        this.routeConfig,
+        this.ctx.get('llm') as RouteRuntime | undefined,
+      ),
       loggedIn: credential !== undefined,
       loginPending: startingMethod !== undefined || flow !== undefined,
       ...startingMethod !== undefined ? { loginMethod: startingMethod } : flow === undefined ? {} : { loginMethod: flow.kind },
@@ -1400,7 +1549,13 @@ export class OpenAICodexAuth extends Service {
       ...credential === undefined ? {} : {
         accountId: credential.accountId,
         expiresAt: credential.expires,
-        ...this.usageCache === undefined ? {} : { usage: this.usageCache },
+        ...this.usageCache === undefined || this.usageAccountId !== credential.accountId
+          ? {} : { usage: this.usageCache },
+        ...this.responseUsage === undefined || this.responseUsage.accountId !== credential.accountId
+          ? {} : { responseUsage: {
+              amount: this.responseUsage.amount,
+              observedAt: this.responseUsage.observedAt,
+            } },
         ...this.usageError === undefined ? {} : { usageError: this.usageError },
       },
       csrf: this.csrf,
@@ -1411,6 +1566,7 @@ export class OpenAICodexAuth extends Service {
     const access = await this.bearerToken()
     if (access === undefined) throw new Error('OpenAI login is missing')
     const response = await fetch(USAGE_URL, {
+      redirect: 'error',
       headers: {
         accept: 'application/json',
         authorization: `Bearer ${access}`,

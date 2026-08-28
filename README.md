@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>把 ChatGPT 订阅登录接入 DeepSeek Harness。</strong><br>
-  设备码优先、浏览器 OAuth 备用；在 DSH 设置页完成登录、查看 Codex 用量，并自动向 <code>openai-codex</code> 模型提供方提供有效凭据。
+  <strong>把 ChatGPT 订阅的 Native Codex Provider 接入 DeepSeek Harness。</strong><br>
+  设备码优先、浏览器 OAuth 备用；默认注册 <code>openai-codex</code>，在 DSH 设置页完成登录、查看用量并直接运行 Codex Responses。
 </p>
 
 <p align="center">
@@ -22,6 +22,8 @@
 ```sh
 dsh plugin --profile web add @pure01fx/dsh-openai-codex-auth
 ```
+
+Native Adapter 默认持有 `openai-codex`。如果现有整合包仍把该 route 配给 `llm-pi-ai` 或其他 Adapter，应由整合包先释放该 route；不要同时挂载两个 owner。只需要本插件的 OAuth/UI 时可显式设置 `nativeAdapter: false`。
 
 开发 checkout 也可直接使用本地路径：
 
@@ -78,8 +80,10 @@ http://localhost:1455/auth/callback
 | --- | --- |
 | 设备码登录 | 无本机 callback，支持远程/headless 使用 |
 | 浏览器 OAuth fallback | PKCE + state、端到端 1455 探测、手动 code 回填和临时 callback listener |
-| Codex 用量面板 | 展示短周期与周用量、剩余额度和重置时间 |
-| 输入框额度圈 | 登录后显示在输入框右下角；Codex turn 结束或点击圆圈时刷新，不做常驻额度轮询 |
+| Codex 用量面板 | 展示短周期与周用量、剩余额度和重置时间；Native 模式直接接收 Codex 返回的套餐额度，`wham/usage` 仅作初始读取和 fallback |
+| 当前路由状态 | 设置页显示 `openai-codex` 当前由本插件 Native Adapter、外部 Adapter 或无人持有；Native 模式同时显示 WebSocket v2 或 HTTP/SSE |
+| 输入框额度圈 | 登录后显示在输入框右下角；悬停或键盘聚焦显示用量，点击圆圈强制刷新，不做常驻额度轮询 |
+| 模型列表隐藏 | 在 Codex 设置页勾选不想看到的模型；只保存在当前浏览器并立即过滤模型选择器，不影响已有会话或 Host 路由 |
 | 自动凭据续期 | 在令牌接近过期时刷新，并更新 DSH credentials |
 | DSH 模型接入 | 将有效令牌提供给 `openai-codex` 模型提供方 |
 | 登录生命周期管理 | 支持取消、15 分钟设备码超时、10 分钟浏览器超时和安全退出 |
@@ -96,7 +100,7 @@ http://localhost:1455/auth/callback
 1. 凭据以 owner-only 权限原子写入 `$DSH_HOME/openai-codex-auth.json`。
 2. access token 通过 DSH credentials 注入 `DSH_OPENAI_CODEX_TOKEN`。
 3. `openai-codex` 模型提供方在请求时读取该凭据。
-4. 输入框右下角显示 Codex 额度圈；插件在 Codex turn 结束或用户点击圆圈时读取用量，不运行常驻额度轮询。
+4. 输入框右下角显示 Codex 额度圈；悬停或键盘聚焦显示当前用量，点击才强制刷新。Native transport 优先消费 WebSocket `codex.rate_limits` 事件或 HTTP `x-codex-*` headers，未收到直接更新时才在 turn 结束后读取 `wham/usage`。
 5. 设置页与额度圈只读取登录状态、账号 ID、过期时间和用量摘要，不接触 token。
 
 ## 同源路由
@@ -173,34 +177,25 @@ $DSH_HOME/openai-codex-auth.json
 
 `path` 的优先级高于 `dshHome`。
 
-### 原生 Codex transport 与独立 Profile
+### 原生 Codex transport 与组合边界
 
-从 0.6 开始，启用 `nativeAdapter` 后，本包会在一次原子注册中持有生产 route `openai-codex`，并默认保留 `openai-codex-native` 兼容 route。若任一 route 已被其他 adapter 持有，注册会整体失败，不会出现半切换。组合时必须先从 `llm-pi-ai` 移除 `openai-codex`；通用 bundle 不会清空未知的 pi-ai sibling providers，下面的固定版本 Profile 才会替换 Hu collection 0.1.1 中已知仅含 Codex 的完整 provider map。不要在仍由 pi-ai 持有该 route 的其他配置树中单独打开 native adapter。
+本包跟踪的上游 Codex repository、commit、release 与 Catalog client version 只在 `src/upstream.ts` 维护；升级上游时先更新该文件，再刷新 fixtures、生成产物和兼容测试，避免多个散落 hash 漂移。
 
-为保留现有 Hu Profile，包内提供 `profiles/native-codex-hu` 模板。它固定当前实际使用的 Hu collection 0.1.1 与 Sidebar 0.16.1，并将本包的 Host contracts 固定到 DSH rc.6；Sidebar 0.16.1 声明的是 rc.8 peers，这是从当前 Hu Profile 原样继承的兼容性风险，并非本包对它作出的 rc.6 支持声明。模板复用相同的 Web、preset 与 subagent 配置，只释放 collection 的已知 Codex pi-ai route、禁用较早挂载的 OAuth 插件实例，再把本包 bundle 放在最后完成 ownership transfer：
+从 0.6 开始，Native Adapter 是插件默认 Provider，并持有生产 route `openai-codex`。旧预览会话确实需要时，可显式设置 `nativeCompatibilityRoute: true`，让同一个 adapter 同时注册 `openai-codex-native` 兼容 route；启用兼容 route 时两者仍原子注册，任一 route 已被占用都会整体失败。默认只暴露生产 route。
 
-```sh
-test ! -e "$DSH_HOME/profiles/native-codex-hu"
-cp -R node_modules/@pure01fx/dsh-openai-codex-auth/profiles/native-codex-hu \
-  "$DSH_HOME/profiles/native-codex-hu"
-dsh plugin --profile native-codex-hu install
-dsh --profile native-codex-hu --dump-config
-dsh --profile native-codex-hu
-```
+本包只定义 Codex Provider，不发布或改写任何具体 Profile。整合包必须在挂载本插件前释放已有的 `openai-codex` route，例如从自己的 `llm-pi-ai` provider map 中移除该项；本包不会清空未知的 sibling providers。只想复用 OAuth/UI 并继续使用外部 Provider 的组合可以显式设置 `nativeAdapter: false`。从 pi-ai 切到 Native 时，旧 foreign replay 会降级为可见持久历史；反向切回 pi-ai 后，已产生 Native replay 的进行中 session 不保证可续跑，应新建 session。
 
-原 Hu Profile 始终保持不变，可用 `dsh --profile hu` 回到原组合；凭据、模型设置和 preset 无需删除。切换到 native 时，旧 pi-ai session 的 foreign replay 会降级为可见持久历史。反向切回 pi-ai 后，已产生 native replay 的进行中 session 不保证可续跑，应新建 session 或继续使用 native Profile；`openai-codex-native` 预览 session 也只在 native Profile 可用。确认不再需要预览 session 后，可设置 `nativeCompatibilityRoute: false` 隐藏兼容 route。
+原生 route 默认使用 Responses WebSocket v2，在会话首个请求上执行 `generate: false` prewarm，并仅在请求历史严格延伸时发送 `previous_response_id` 与增量后缀。连接重建会清除增量链；纯 WebSocket/HTTP 连接建立失败不消耗普通 stream retry 预算，而是按 Codex 的网络恢复策略从 5 秒指数退避到 60 秒并持续等待成功或取消，因此可跨越半分钟断网。连接已经建立后的首个 DSH chunk 前错误仍使用默认 5 次 stream retry 与 200ms 起步的有界指数退避，安全重试耗尽或握手返回 HTTP 426 后，该 DSH 会话会确定性地回退到 HTTP/SSE。transport 层在任何 DSH chunk 已输出后仍不会直接重放原始 stream；它会把瞬态中断重新分类为只允许 durable failed-step 恢复的错误，标准 Agent Profile 中的 `dsh-llm-retry` 再按默认 5 次策略重建请求。该外层策略不会再次匹配 transport 已在首个 chunk 前耗尽的有限 stream 错误，避免两层预算相乘；失败 attempt 的原始事件可以留作非 surface 诊断，但不会组装成模型可见的持久 assistant message。未加载该恢复插件的直接 `ctx.llm.stream()` 调用在首个 chunk 后仍保持 single-attempt，避免重复输出。WebSocket `codex.rate_limits` 事件、握手/错误 metadata 以及 HTTP/SSE response headers 中的 `x-codex-*` quota 会被边界校验后直接写入 Host 用量缓存；额外 metered limit 不会覆盖默认 `codex` 套餐卡片。`response.completed.usage_metadata.amount` 会按原始高精度字符串保留，并作为当前账号的最近响应观测出现在 status JSON 中。
 
-原生 route 默认使用 Responses WebSocket v2，在会话首个请求上执行 `generate: false` prewarm，并仅在请求历史严格延伸时发送 `previous_response_id` 与增量后缀。连接重建会清除增量链；安全重试耗尽或握手返回 HTTP 426 后，该 DSH 会话会确定性地回退到 HTTP/SSE。任何 DSH chunk 已输出后都不会跨 transport 重放。
-
-`<base>-fast` 只是公开选择别名：wire model 仍是 `<base>`，请求携带 `service_tier: priority`。若账号目录不声明 priority 能力，或请求前账号 authority 已改变，Fast 会直接失败，不会静默降级。
+`<base>-fast` 只是公开选择别名：wire model 仍是 `<base>`，请求携带 `service_tier: priority`。若账号目录不声明 priority 能力，或请求前账号 authority 已改变，Fast 会直接失败，不会静默降级。Reasoning 选择在 adapter 边界按上游规则转换：`persistent` 在线上请求中写为 `disabled`；`ultra` 优先使用 Catalog 的 `multi_agent_reasoning_effort`，否则回退到 `max`、最高非 Ultra 档或 `medium`。
 
 ```yaml
 - insert:
     - id: openai-codex-auth
       name: '@pure01fx/dsh-openai-codex-auth'
       config:
-        nativeAdapter: true
-        nativeCompatibilityRoute: true # 默认值
+        nativeAdapter: true # 默认值；只使用外部 Provider 时显式设为 false
+        nativeCompatibilityRoute: false # 默认值；仅续跑旧预览 session 时设为 true
         nativeWebSocket: true # 默认值；设为 false 可强制使用 HTTP/SSE
 ```
 
@@ -213,6 +208,7 @@ dsh --profile native-codex-hu
 - 设备码由 Host 轮询；Web 页面只看到用户码、验证网址和过期时间。
 - 凭据目录与文件分别以 owner-only 权限创建，并通过文件锁和原子写入更新。
 - access token 与 refresh token 只保存在 Host 侧；Web 页面不会读取或保存它们。
+- OAuth、Catalog、Responses 与用量请求均拒绝 HTTP redirect，避免 credential-bearing 请求进入重定向链。
 - 管理路由复用 DSH `trustedHosts`，并检查 Host、Origin、Fetch Metadata 和 CSRF。
 - 临时 callback Server 只绑定 IPv4/IPv6 loopback 的 1455，并只接受注册 URI 对应的 `Host: localhost:1455`、`/auth/callback` 路径和匹配的 state。
 - 浏览器连通性探测使用 flow 专属随机 URL，只向 HTTP `127.0.0.1`/`localhost` Origin 返回 CORS 结果；手动 code 提交受同源管理检查和 CSRF 保护，粘贴完整 URL 时还会校验 state。

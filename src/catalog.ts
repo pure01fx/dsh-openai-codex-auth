@@ -2,10 +2,10 @@
 import { createHash } from 'node:crypto'
 import { nativeCodexEndpoint } from './endpoint.js'
 import { attributionHeaders, LlmError } from '@deepseek-ai/dsh-llm'
+import { CODEX_CLIENT_VERSION } from './upstream.js'
 
+export { CODEX_CLIENT_VERSION } from './upstream.js'
 export const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models'
-/** Backend-compatible Codex catalog version; the pinned workspace's 0.0.0 is a development placeholder. */
-export const CODEX_CLIENT_VERSION = '0.147.0'
 export const CODEX_CATALOG_CACHE_TTL_MS = 5 * 60_000
 const CODEX_CATALOG_MAX_STALE_MS = 7 * 24 * 60 * 60_000
 const CODEX_CATALOG_TIMEOUT_MS = 5_000
@@ -41,6 +41,7 @@ export interface NativeCodexModel {
   description?: string
   defaultReasoningLevel?: string
   supportedReasoningLevels: readonly NativeCodexReasoningLevel[]
+  multiAgentReasoningEffort?: string
   visibility: string
   supportedInApi: boolean
   priority: number
@@ -235,6 +236,11 @@ function parseModel(value: unknown): NativeCodexModel {
     && nonEmptyString(row.default_service_tier) === undefined) {
     throw invalidCatalog('native Codex catalog contained an invalid default service tier')
   }
+  if (row.multi_agent_reasoning_effort !== undefined
+    && row.multi_agent_reasoning_effort !== null
+    && nonEmptyString(row.multi_agent_reasoning_effort) === undefined) {
+    throw invalidCatalog('native Codex catalog contained an invalid multi-agent reasoning effort')
+  }
   for (const key of ['context_window', 'max_context_window'] as const) {
     if (row[key] !== undefined && row[key] !== null && positiveNumber(row[key]) === undefined) {
       throw invalidCatalog('native Codex catalog contained an invalid context window')
@@ -242,6 +248,7 @@ function parseModel(value: unknown): NativeCodexModel {
   }
   const description = nonEmptyString(row.description)
   const defaultReasoningLevel = nonEmptyString(row.default_reasoning_level)
+  const multiAgentReasoningEffort = nonEmptyString(row.multi_agent_reasoning_effort)
   const defaultServiceTier = nonEmptyString(row.default_service_tier)
   const contextWindow = positiveNumber(row.context_window) ?? positiveNumber(row.max_context_window)
   return {
@@ -250,6 +257,7 @@ function parseModel(value: unknown): NativeCodexModel {
     ...description === undefined ? {} : { description },
     ...defaultReasoningLevel === undefined ? {} : { defaultReasoningLevel },
     supportedReasoningLevels: reasoning,
+    ...multiAgentReasoningEffort === undefined ? {} : { multiAgentReasoningEffort },
     visibility: visibility as string,
     supportedInApi: row.supported_in_api,
     priority,
@@ -395,6 +403,7 @@ export class NativeCodexCatalog implements NativeCodexModelCatalog {
       try {
         response = await this.fetchImpl(url, {
           method: 'GET',
+          redirect: 'error',
           headers: {
             authorization: `Bearer ${credential.accessToken}`,
             'chatgpt-account-id': credential.accountId,

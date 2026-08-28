@@ -1,8 +1,5 @@
-# The native adapter claims production plus compatibility routes atomically. A profile
-# that still gives openai-codex to pi-ai must release that route before activation.
+# Native Codex is the package default. Integration bundles own any removal or
+# replacement of an existing openai-codex route before mounting this plugin.
 - insert:
     - id: openai-codex-auth
       name: '@pure01fx/dsh-openai-codex-auth'
-      config:
-        nativeAdapter: true
-        nativeCompatibilityRoute: true

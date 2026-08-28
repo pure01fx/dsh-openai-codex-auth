@@ -1,6 +1,8 @@
 import { type ContentBlock, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { type NativeCodexCredential } from './catalog.js';
-import type { NativeCodexTransportMode } from './native-adapter.js';
+import { type NativeCodexTransportMode } from './native-adapter.js';
+import { type CodexResponseUsageCallback } from './response-usage.js';
+import { type CodexRateLimitCallback } from './rate-limits.js';
 export declare const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 type ImageBlock = Extract<ContentBlock, {
     type: 'image';
@@ -25,6 +27,8 @@ export interface NativeCodexHttpOptions {
     sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
     createRequestId?: () => string;
     onCompleted?: () => void;
+    onRateLimits?: CodexRateLimitCallback;
+    onResponseUsage?: CodexResponseUsageCallback;
     warn?: (message: string) => void;
 }
 export interface NativeCodexPreparedRequest {
@@ -49,6 +53,7 @@ export declare class NativeCodexHttpTransport {
     constructor(options: NativeCodexHttpOptions);
     private retryDelay;
     private wait;
+    private waitForConnection;
     endpointUrl(): string;
     prepare(generation: GenerateOptions, mode?: NativeCodexTransportMode): Promise<NativeCodexPreparedRequest>;
     stream(generation: GenerateOptions, mode?: NativeCodexTransportMode): AsyncIterable<StreamChunk>;

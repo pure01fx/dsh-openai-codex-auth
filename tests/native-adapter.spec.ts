@@ -15,6 +15,8 @@ import {
   CODEX_PROVIDER,
   NATIVE_CODEX_PROVIDER,
   NativeCodexAdapter,
+  isNativeCodexConnectionFailure,
+  nativeCodexWireReasoningEffort,
 } from '../src/native-adapter.ts'
 
 class RegistrationCredentials {
@@ -84,6 +86,24 @@ describe('NativeCodexAdapter catalog boundary', () => {
   afterEach(async () => {
     vi.unstubAllGlobals()
     await runtimeFiber.dispose()
+  })
+
+  it('distinguishes network establishment failures from permanent handshake errors', () => {
+    expect(isNativeCodexConnectionFailure({ code: 'ECONNREFUSED' })).toBe(true)
+    expect(isNativeCodexConnectionFailure(new TypeError('fetch failed', {
+      cause: Object.assign(new Error('dns failed'), { code: 'ENOTFOUND' }),
+    }))).toBe(true)
+    expect(isNativeCodexConnectionFailure({
+      errors: [{ code: 'ENETUNREACH' }, { code: 'ECONNREFUSED' }],
+    })).toBe(true)
+    expect(isNativeCodexConnectionFailure(
+      new Error('Opening handshake has timed out'),
+    )).toBe(true)
+    expect(isNativeCodexConnectionFailure(
+      new Error('Invalid Sec-WebSocket-Accept header'),
+    )).toBe(false)
+    expect(isNativeCodexConnectionFailure({ code: 'DEPTH_ZERO_SELF_SIGNED_CERT' })).toBe(false)
+    expect(isNativeCodexConnectionFailure(new TypeError('invalid header value'))).toBe(false)
   })
 
   it('returns valid fixed-route metadata and advisory exact model identity', async () => {
@@ -234,6 +254,48 @@ describe('NativeCodexAdapter catalog boundary', () => {
     dispose()
   })
 
+  it('maps Ultra and Persistent selections to official Responses wire efforts', async () => {
+    const model: NativeCodexModel = {
+      slug: 'reasoning-model',
+      displayName: 'Reasoning Model',
+      supportedReasoningLevels: [
+        { effort: 'low', description: 'Low' },
+        { effort: 'high', description: 'High' },
+        { effort: 'max', description: 'Max' },
+        { effort: 'ultra', description: 'Ultra' },
+      ],
+      multiAgentReasoningEffort: 'high',
+      visibility: 'list',
+      supportedInApi: true,
+      priority: 0,
+      additionalSpeedTiers: [],
+      serviceTiers: [],
+      inputModalities: ['text'],
+    }
+    const seen: Array<string | undefined> = []
+    const adapter = new NativeCodexAdapter({
+      list: async () => [model],
+      etag: () => undefined,
+    }, {
+      async *stream(options) {
+        seen.push(options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort))
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    })
+
+    for (const effort of ['ultra', 'persistent'] as const) {
+      await collect(adapter.stream({
+        ...request(), model: model.slug,
+        reasoningEffort: effort as GenerateOptions['reasoningEffort'],
+      }))
+    }
+
+    expect(seen).toEqual(['high', 'disabled'])
+    const { multiAgentReasoningEffort: _configured, ...withoutConfigured } = model
+    expect(nativeCodexWireReasoningEffort('ultra', withoutConfigured)).toBe('max')
+    expect(nativeCodexWireReasoningEffort('ultra')).toBe('medium')
+  })
+
   it('maps a Fast stream to the base model and never silently downgrades', async () => {
     const fastModel: NativeCodexModel = {
       slug: 'gpt-fast-capable',
@@ -339,7 +401,7 @@ describe('NativeCodexAdapter catalog boundary', () => {
     expect(seen).toEqual([{ model: 'model-fast' }])
   })
 
-  it('registers the opt-in route and streams through external authority', async () => {
+  it('registers the native route by default with an opt-in compatibility route', async () => {
     const home = await mkdtemp(join(tmpdir(), 'openai-codex-native-registration-'))
     const credentials = new RegistrationCredentials()
     credentials.value = accessToken('acct_registration')
@@ -377,7 +439,7 @@ describe('NativeCodexAdapter catalog boundary', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     const authFiber = await ctx.plugin(OpenAICodexAuth, {
-      dshHome: home, nativeAdapter: true, nativeWebSocket: false,
+      dshHome: home, nativeCompatibilityRoute: true, nativeWebSocket: false,
     })
     try {
       await vi.waitFor(() => {
@@ -478,7 +540,7 @@ describe('NativeCodexAdapter catalog boundary', () => {
     disposeExisting()
   })
 
-  it('delegates through the real runtime with outer retries disabled', async () => {
+  it('delegates through the real runtime with Codex-aligned failed-step retries', async () => {
     const seen: GenerateOptions[] = []
     const transport = {
       async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -502,10 +564,16 @@ describe('NativeCodexAdapter catalog boundary', () => {
       { type: 'finish', reason: { kind: 'stop' } },
     ])
     expect(seen).toHaveLength(1)
-    expect(adapter.providerRetryPolicy(CODEX_PROVIDER)).toMatchObject({
+    expect(adapter.providerRetryPolicy(CODEX_PROVIDER)).toEqual({
       mode: 'normal',
-      maxRetries: 0,
-      retryableCodes: [],
+      maxRetries: 5,
+      retryableCodes: [
+        'EMPTY_RESPONSE',
+        'NATIVE_CODEX_STREAM_INTERRUPTED',
+      ],
+      initialDelayMs: 200,
+      maxDelayMs: 10_000,
+      jitterRatio: 0.1,
     })
 
     disposeNative()

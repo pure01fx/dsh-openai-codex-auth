@@ -10,8 +10,44 @@ window.__ModuleLoader__.load({
     const BASE = '/openai-codex'
     const PLUGIN_ID = '@pure01fx/dsh-openai-codex-auth'
     const statusSubscribers = new Set()
+    const HIDDEN_MODELS_KEY = 'dsh.openai-codex.hidden-models.v1'
+    const AVAILABLE_MODELS_KEY = 'dsh.openai-codex.available-models.v1'
+    const MODEL_VISIBILITY_EVENT = 'dsh:openai-codex-model-visibility'
+    const MODEL_CATALOG_EVENT = 'dsh:openai-codex-model-catalog'
     let sharedStatus = null
     let statusRequestGeneration = 0
+
+    function storedJson(key, fallback) {
+      try {
+        const value = JSON.parse(window.localStorage.getItem(key) || 'null')
+        return value === null ? fallback : value
+      } catch {
+        return fallback
+      }
+    }
+
+    function readModelVisibility() {
+      const availableValue = storedJson(AVAILABLE_MODELS_KEY, [])
+      const hiddenValue = storedJson(HIDDEN_MODELS_KEY, [])
+      const available = Array.isArray(availableValue)
+        ? availableValue.slice(0, 512).filter((model) => model && typeof model.id === 'string'
+          && model.id.length > 0 && typeof model.name === 'string' && model.name.length > 0)
+        : []
+      const hidden = Array.isArray(hiddenValue)
+        ? [...new Set(hiddenValue.slice(0, 512).filter((id) => typeof id === 'string' && id.length > 0))]
+        : []
+      return { available, hidden }
+    }
+
+    function writeHiddenModels(hidden) {
+      try {
+        window.localStorage.setItem(HIDDEN_MODELS_KEY, JSON.stringify(hidden))
+        window.dispatchEvent(new CustomEvent(MODEL_VISIBILITY_EVENT, { detail: hidden }))
+        return true
+      } catch {
+        return false
+      }
+    }
 
     const css = `
       .codexSection{box-sizing:border-box;max-width:720px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px}
@@ -35,6 +71,8 @@ window.__ModuleLoader__.load({
       .codexBar{height:6px;margin:10px 0 8px;overflow:hidden;border-radius:999px;background:var(--dsw-alias-bg-layer-1)}.codexBarFill{height:100%;border-radius:inherit;background:var(--dsw-alias-state-success-primary);transition:width .25s ease}.codexBarFill.high{background:var(--dsw-alias-state-warn-label)}
       .codexReset{font-size:12px;color:var(--dsw-alias-label-tertiary)}
       .codexPlan{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:2px}.codexPlan strong{font-size:14px;font-weight:500}.codexPlan span{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+      .codexRoute{margin-bottom:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:11px 12px;background:var(--dsw-alias-bg-layer-2)}.codexRouteHead{display:flex;align-items:center;justify-content:space-between;gap:12px}.codexRouteHead strong{font-size:13px;font-weight:500}.codexRouteValue{margin-top:5px;color:var(--dsw-alias-label-primary);font:12px/18px ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.codexRouteDetail{margin:3px 0 0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+      .codexModelVisibility{margin-top:14px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:14px}.codexModelVisibilityHead{display:flex;align-items:center;justify-content:space-between;gap:12px}.codexModelVisibilityHead strong{font-size:13px;font-weight:500}.codexModelVisibilityHint{margin:4px 0 8px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.codexModelVisibilityList{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;max-height:220px;overflow:auto}.codexModelVisibilityOption{display:flex;align-items:flex-start;gap:8px;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:7px 8px;background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px;cursor:pointer}.codexModelVisibilityOption input{margin:2px 0 0;flex:none}.codexModelVisibilityOption span{min-width:0;overflow-wrap:anywhere}.codexModelVisibilityReset{border:0;background:transparent;color:var(--dsw-alias-label-secondary);padding:0;font:12px/18px inherit;cursor:pointer}.codexModelVisibilityReset:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
       .codexNotice,.codexWarning,.codexError{margin:14px 0 0;border-radius:8px;padding:8px 10px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
       .codexWarning{color:var(--dsw-alias-state-warn-label)}.codexError{color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere}
       .codexDevice{margin-top:14px;border:1px solid var(--dsw-alias-brand-primary);border-radius:10px;padding:14px;background:var(--dsw-alias-interactive-bg-hover)}
@@ -50,7 +88,7 @@ window.__ModuleLoader__.load({
       .codexQuotaTrack{fill:none;stroke:var(--dsw-alias-border-l3);stroke-width:2px}.codexQuotaAvailable{fill:none;stroke:var(--dsw-alias-state-success-primary);stroke-width:2px;stroke-linecap:round;transition:stroke .25s ease,stroke-dasharray .25s ease,stroke-dashoffset .25s ease}.codexQuotaAvailable.high{stroke:var(--dsw-alias-state-warn-label)}.codexQuotaAvailable.critical{stroke:var(--dsw-alias-state-error-primary)}.codexQuotaLoading{animation:codexQuotaPulse .8s ease-in-out infinite alternate}
       .codexQuotaPanel{z-index:100;box-sizing:border-box;width:272px;border:1px solid var(--dsw-alias-border-inverted);border-radius:12px;padding:12px;background:var(--dsw-specific-menu);box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-secondary);cursor:default;font-size:12px;line-height:20px;position:absolute;right:0;bottom:calc(100% + 8px)}.codexQuotaPanelHead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.codexQuotaPanelHead strong{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500}.codexQuotaPanelHead span{color:var(--dsw-alias-label-tertiary)}
       .codexQuotaWindow{padding:7px 0}.codexQuotaWindow+.codexQuotaWindow{border-top:1px solid var(--dsw-alias-border-l2)}.codexQuotaWindowHead{display:flex;align-items:center;justify-content:space-between;gap:10px}.codexQuotaWindowHead strong{font-weight:500;color:var(--dsw-alias-label-secondary)}.codexQuotaWindowHead span{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}.codexQuotaBar{height:4px;margin:6px 0;border-radius:999px;overflow:hidden;background:var(--dsw-alias-interactive-bg-hover)}.codexQuotaBarFill{height:100%;border-radius:inherit;background:var(--dsw-alias-state-success-primary)}.codexQuotaBarFill.high{background:var(--dsw-alias-state-warn-label)}.codexQuotaBarFill.critical{background:var(--dsw-alias-state-error-primary)}.codexQuotaReset{color:var(--dsw-alias-label-tertiary)}.codexQuotaMessage{margin:4px 0;color:var(--dsw-alias-label-tertiary)}.codexQuotaMessage.error{color:var(--dsw-alias-state-error-primary)}
-      @keyframes codexPulse{to{background-position:-200% 0}}@keyframes codexQuotaPulse{to{opacity:.35}}@media(prefers-reduced-motion:reduce){.codexSkeleton,.codexQuotaLoading{animation:none}}@media(max-width:620px){.codexHero{padding:14px;flex-direction:column}.codexBody{padding:14px}.codexGrid{grid-template-columns:1fr}.codexCode{font-size:20px}}
+      @keyframes codexPulse{to{background-position:-200% 0}}@keyframes codexQuotaPulse{to{opacity:.35}}@media(prefers-reduced-motion:reduce){.codexSkeleton,.codexQuotaLoading{animation:none}}@media(max-width:620px){.codexHero{padding:14px;flex-direction:column}.codexBody{padding:14px}.codexGrid,.codexModelVisibilityList{grid-template-columns:1fr}.codexCode{font-size:20px}}
     `
     if (typeof document !== 'undefined' && document.querySelector('style[data-plugin="' + PLUGIN_ID + '"]') === null) {
       const style = document.createElement('style')
@@ -102,6 +140,11 @@ window.__ModuleLoader__.load({
       return relative + ' · ' + date.toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     }
 
+    function displayQuotaWindow(window) {
+      if (!window) return false
+      return !(Number(window.usedPercent) === 0 && !Number.isFinite(window.resetAt))
+    }
+
     function formatCountdown(expiresAt, now) {
       const seconds = Math.max(0, Math.ceil((Number(expiresAt) - now) / 1000))
       return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0')
@@ -116,6 +159,41 @@ window.__ModuleLoader__.load({
           && (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')
       } catch {
         return false
+      }
+    }
+
+    function routePresentation(route) {
+      if (!route) return null
+      const provider = route.provider || 'openai-codex'
+      const registeredName = route.registeredName && route.registeredName !== provider ? ' · ' + route.registeredName : ''
+      if (route.owner === 'native') {
+        const transport = route.transport === 'http-sse' ? 'HTTP/SSE' : 'WebSocket v2'
+        const compatibility = route.compatibilityRoute && route.compatibilityRoute.active ? '；兼容路由已启用' : ''
+        return {
+          title: '原生 Codex Adapter',
+          value: provider + ' · ' + transport,
+          detail: route.active
+            ? '当前由本插件直接处理模型请求' + compatibility + '。'
+            : '已配置 Native Adapter，但生产路由尚未注册。',
+          tone: route.active ? 'connected' : 'pending',
+          state: route.active ? '已激活' : '未激活',
+        }
+      }
+      if (route.owner === 'external') {
+        return {
+          title: '外部 Adapter',
+          value: provider + registeredName,
+          detail: '本插件当前只提供登录与凭据；模型请求由其他 Adapter 处理。DSH rc.6 不公开其具体 owner 身份。',
+          tone: 'connected',
+          state: '已激活',
+        }
+      }
+      return {
+        title: '未注册模型路由',
+        value: provider,
+        detail: '当前没有 Adapter 持有生产 Codex 路由，模型请求将不可用。',
+        tone: 'pending',
+        state: '不可用',
       }
     }
 
@@ -222,12 +300,12 @@ window.__ModuleLoader__.load({
       if (!status || !status.loggedIn) return null
       const usage = status.usage
       const primary = usage && usage.primary
-      const secondary = usage && usage.secondary
+      const secondary = usage && displayQuotaWindow(usage.secondary) ? usage.secondary : null
       const meter = primary || secondary
       const used = meter ? Math.max(0, Math.min(100, Number(meter.usedPercent) || 0)) : 0
       const remaining = Math.max(0, 100 - used)
       const reading = meter ? Math.round(remaining) + '%' : '待更新'
-      const title = loading ? '正在刷新 Codex 额度' : 'Codex 额度剩余 ' + reading
+      const title = loading ? '正在刷新 Codex 额度' : 'Codex 额度剩余 ' + reading + '；点击刷新'
       const circumference = 2 * Math.PI * 5.5
       const usedLength = circumference * used / 100
       const remainingLength = circumference - usedLength
@@ -235,7 +313,12 @@ window.__ModuleLoader__.load({
       if (primary) windows.push({ name: quotaWindowName(primary, false), window: primary })
       if (secondary) windows.push({ name: quotaWindowName(secondary, true), window: secondary })
 
-      return h('span', { ref: rootRef, className: 'codexQuotaRoot' },
+      return h('span', {
+        ref: rootRef,
+        className: 'codexQuotaRoot',
+        onMouseEnter: () => { setOpen(true) },
+        onMouseLeave: () => { setOpen(false) },
+      },
         h('button', {
           type: 'button',
           className: 'codexQuotaTrigger' + (loading ? ' codexQuotaLoading' : ''),
@@ -243,8 +326,12 @@ window.__ModuleLoader__.load({
           'aria-label': title,
           'aria-haspopup': 'dialog',
           'aria-expanded': open,
+          onFocus: () => { setOpen(true) },
+          onBlur: (event) => {
+            if (!rootRef.current || !rootRef.current.contains(event.relatedTarget)) setOpen(false)
+          },
           onClick: () => {
-            setOpen((value) => !value)
+            setOpen(true)
             void load(true)
           },
         },
@@ -265,7 +352,7 @@ window.__ModuleLoader__.load({
           ),
           windows.length > 0
             ? windows.map((row) => h(QuotaWindow, { key: row.name, name: row.name, window: row.window }))
-            : h('p', { className: 'codexQuotaMessage' }, '点击圆圈读取最新额度。'),
+            : h('p', { className: 'codexQuotaMessage' }, '点击圆圈刷新最新额度。'),
           status.usageError ? h('p', { className: 'codexQuotaMessage error', role: 'status' }, '额度读取失败：' + status.usageError) : null,
           error ? h('p', { className: 'codexQuotaMessage error', role: 'status' }, '无法连接额度接口：' + error) : null,
         ) : null,
@@ -281,7 +368,45 @@ window.__ModuleLoader__.load({
       const [probe, setProbe] = useState({ state: 'idle', message: '' })
       const [manualInput, setManualInput] = useState('')
       const [now, setNow] = useState(Date.now())
+      const [modelVisibility, setModelVisibility] = useState(readModelVisibility)
       const probeGeneration = useRef(0)
+
+      useEffect(() => {
+        const reload = () => { setModelVisibility(readModelVisibility()) }
+        const storage = (event) => {
+          if (event.key === HIDDEN_MODELS_KEY || event.key === AVAILABLE_MODELS_KEY) reload()
+        }
+        window.addEventListener(MODEL_CATALOG_EVENT, reload)
+        window.addEventListener('storage', storage)
+        return () => {
+          window.removeEventListener(MODEL_CATALOG_EVENT, reload)
+          window.removeEventListener('storage', storage)
+        }
+      }, [])
+
+      const updateHiddenModel = useCallback((modelId, hidden) => {
+        setModelVisibility((current) => {
+          const ids = new Set(current.hidden)
+          if (hidden) ids.add(modelId)
+          else ids.delete(modelId)
+          const next = [...ids]
+          if (!writeHiddenModels(next)) {
+            setError('浏览器无法保存模型隐藏设置。')
+            return current
+          }
+          setError('')
+          return { ...current, hidden: next }
+        })
+      }, [])
+
+      const resetHiddenModels = useCallback(() => {
+        if (!writeHiddenModels([])) {
+          setError('浏览器无法保存模型隐藏设置。')
+          return
+        }
+        setError('')
+        setModelVisibility((current) => ({ ...current, hidden: [] }))
+      }, [])
 
       const load = useCallback(async (refresh) => {
         try {
@@ -466,11 +591,19 @@ window.__ModuleLoader__.load({
       const browserPending = Boolean(status && status.loginMethod === 'browser' && status.browser)
       const browserAvailable = Boolean(status && browserLoginAvailable(status.browserCallbackUrl))
       const plan = usage && usage.planType ? String(usage.planType).toUpperCase() : 'ChatGPT 订阅'
+      const usageSource = usage && usage.source === 'response' ? 'Codex 返回' : '额度接口'
+      const creditNotice = usage && usage.credits
+        ? usage.credits.unlimited ? 'Codex Credits：无限'
+          : usage.credits.hasCredits
+            ? 'Codex Credits' + (usage.credits.balance ? ' 余额：' + usage.credits.balance : '：可用')
+            : 'Codex Credits：不可用'
+        : null
+      const route = routePresentation(status && status.route)
       const windows = useMemo(() => {
         if (!usage) return []
         const rows = []
         if (usage.primary) rows.push({ name: usage.primary.windowSeconds === 18000 ? '5 小时额度' : '短周期额度', window: usage.primary })
-        if (usage.secondary) rows.push({ name: '周额度', window: usage.secondary })
+        if (displayQuotaWindow(usage.secondary)) rows.push({ name: '周额度', window: usage.secondary })
         return rows
       }, [usage])
 
@@ -491,15 +624,52 @@ window.__ModuleLoader__.load({
             ),
           ),
           h('div', { className: 'codexBody' },
+            route
+              ? h('div', { className: 'codexRoute' },
+                  h('div', { className: 'codexRouteHead' },
+                    h('strong', null, '当前模型路由'),
+                    h('span', { className: 'codexBadge ' + route.tone },
+                      h('span', { className: 'codexDot', 'aria-hidden': true }), route.state,
+                    ),
+                  ),
+                  h('div', { className: 'codexRouteValue' }, route.title + ' · ' + route.value),
+                  h('p', { className: 'codexRouteDetail' }, route.detail),
+                )
+              : null,
             loading
               ? h('div', { 'aria-label': '加载中' }, h('div', { className: 'codexSkeleton' }), h('div', { className: 'codexSkeleton', style: { width: '72%' } }))
               : connected
                 ? h(React.Fragment, null,
-                    h('div', { className: 'codexPlan' }, h('strong', null, plan), h('span', null, usage && usage.fetchedAt ? '更新于 ' + new Date(usage.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '额度信息待更新')),
+                    h('div', { className: 'codexPlan' }, h('strong', null, plan), h('span', null, usage && usage.fetchedAt ? '更新于 ' + new Date(usage.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' · ' + usageSource : '额度信息待更新')),
                     windows.length > 0
                       ? h('div', { className: 'codexGrid' }, windows.map((row) => h(UsageCard, { key: row.name, name: row.name, window: row.window })))
                       : h('p', { className: 'codexEmpty' }, '账号已连接，暂时没有返回可展示的额度窗口。'),
                     usage && Number.isFinite(usage.resetCredits) ? h('p', { className: 'codexNotice' }, '可用额度重置次数：' + usage.resetCredits) : null,
+                    creditNotice ? h('p', { className: 'codexNotice' }, creditNotice) : null,
+                    h('div', { className: 'codexModelVisibility' },
+                      h('div', { className: 'codexModelVisibilityHead' },
+                        h('strong', null, '模型列表显示'),
+                        h('button', {
+                          type: 'button',
+                          className: 'codexModelVisibilityReset',
+                          disabled: modelVisibility.hidden.length === 0,
+                          onClick: resetHiddenModels,
+                        }, '全部显示'),
+                      ),
+                      h('p', { className: 'codexModelVisibilityHint' }, '勾选要隐藏的模型；只影响当前浏览器中的模型选择列表，不会禁用模型或改变已有会话。'),
+                      modelVisibility.available.length > 0
+                        ? h('div', { className: 'codexModelVisibilityList' }, modelVisibility.available.map((model) =>
+                            h('label', { className: 'codexModelVisibilityOption', key: model.id },
+                              h('input', {
+                                type: 'checkbox',
+                                checked: modelVisibility.hidden.includes(model.id),
+                                onChange: (event) => { updateHiddenModel(model.id, event.target.checked) },
+                              }),
+                              h('span', null, model.name === model.id ? model.id : model.name + ' · ' + model.id),
+                            ),
+                          ))
+                        : h('p', { className: 'codexEmpty' }, '打开一个会话的模型列表后，这里会显示可隐藏的 Codex 模型。'),
+                    ),
                     status.usageError ? h('p', { className: 'codexError', role: 'status' }, '额度读取失败：' + status.usageError) : null,
                   )
                 : h('p', { className: 'codexEmpty' }, '设备码登录可在任意设备完成授权，令牌只由 Host 保存和刷新，Web 页面不会读取令牌。'),

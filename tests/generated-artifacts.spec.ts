@@ -11,6 +11,13 @@ import { NativeCodexWebSocketTransport } from '../lib/native-websocket.js'
 import { codexRequestBody } from '../lib/responses.js'
 import { parseSse } from '../lib/sse.js'
 import { createNativeCodexReplayState, replayAssistantInput } from '../lib/replay.js'
+import { parseCodexRateLimitEvent } from '../lib/rate-limits.js'
+import { parseCodexResponseUsageMetadata } from '../lib/response-usage.js'
+import { mergeDirectUsage } from '../lib/usage.js'
+import {
+  CODEX_CLIENT_VERSION,
+  TRACKED_CODEX_COMMIT,
+} from '../lib/upstream.js'
 import {
   NATIVE_CODEX_PROVIDER,
   NativeCodexAdapter,
@@ -18,6 +25,15 @@ import {
 
 describe('generated package artifacts', () => {
   it('imports the package graph and contains the M2 model mapper', async () => {
+    const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')) as {
+      files: string[]
+    }
+    expect(manifest.files).toEqual(expect.arrayContaining([
+      'lib/rate-limits.js', 'lib/rate-limits.d.ts',
+      'lib/response-usage.js', 'lib/response-usage.d.ts',
+      'lib/upstream.js', 'lib/upstream.d.ts',
+      'lib/usage.js', 'lib/usage.d.ts',
+    ]))
     expect(OpenAICodexAuth).toBeTypeOf('function')
     expect(NativeCodexCatalog).toBeTypeOf('function')
     expect(NativeCodexHttpTransport).toBeTypeOf('function')
@@ -26,6 +42,11 @@ describe('generated package artifacts', () => {
     expect(parseSse).toBeTypeOf('function')
     expect(createNativeCodexReplayState).toBeTypeOf('function')
     expect(replayAssistantInput).toBeTypeOf('function')
+    expect(parseCodexRateLimitEvent).toBeTypeOf('function')
+    expect(parseCodexResponseUsageMetadata).toBeTypeOf('function')
+    expect(mergeDirectUsage).toBeTypeOf('function')
+    expect(TRACKED_CODEX_COMMIT).toMatch(/^[0-9a-f]{40}$/u)
+    expect(CODEX_CLIENT_VERSION).toBe('0.151.0')
     const adapter = new NativeCodexAdapter({
       etag: () => undefined,
       list: async () => [{
@@ -99,7 +120,7 @@ describe('generated package artifacts', () => {
       const modules = [
         'catalog', 'endpoint', 'index', 'native-adapter', 'native-http',
         'native-websocket', 'native-websocket-session', 'native-websocket-socket',
-        'replay', 'responses', 'sse',
+        'rate-limits', 'replay', 'response-usage', 'responses', 'sse', 'upstream', 'usage',
       ]
       for (const module of modules) {
         for (const extension of ['js', 'd.ts']) {

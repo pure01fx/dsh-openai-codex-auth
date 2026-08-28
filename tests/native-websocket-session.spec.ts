@@ -60,6 +60,33 @@ describe('NativeCodexWebSocketSessionState', () => {
     })
   })
 
+  it('keeps incremental reuse beyond 2048 historical input items', () => {
+    const state = new NativeCodexWebSocketSessionState()
+    const history = Array.from({ length: 2049 }, (_, index) => ({
+      type: 'message', role: 'user', content: [{ type: 'input_text', text: String(index) }],
+    }))
+    const first = request({ input: history })
+    const initial = state.plan(first)
+    expect(initial.incremental).toBe(false)
+    expect(initial.payload.input).toHaveLength(2049)
+
+    const output = {
+      type: 'function_call', id: 'fc_large', call_id: 'call_large',
+      name: 'lookup', arguments: '{}',
+    }
+    state.complete('resp_large', [output])
+    const result = { type: 'function_call_output', call_id: 'call_large', output: 'found' }
+    const next = request({ input: [...history, output, result] })
+    expect(state.plan(next)).toEqual({
+      payload: {
+        type: 'response.create', ...next,
+        previous_response_id: 'resp_large', input: [result],
+      },
+      incremental: true,
+      previousResponseId: 'resp_large',
+    })
+  })
+
   it('falls back to a full create for non-prefix or property changes', () => {
     const output = { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }
     for (const next of [
@@ -113,12 +140,8 @@ describe('NativeCodexWebSocketSessionState', () => {
     expect(state.plan(first, true)).toMatchObject({ incremental: false })
   })
 
-  it('bounds request, response, and completion identities', () => {
+  it('bounds response and completion identities', () => {
     const state = new NativeCodexWebSocketSessionState()
-    expect(() => state.plan(request({
-      input: Array.from({ length: 2049 }, () => ({ type: 'message' })),
-    }))).toThrowError(expect.objectContaining({ code: 'REQUEST_TOO_LARGE' }))
-
     state.plan(request())
     expect(() => state.complete('r'.repeat(257), []))
       .toThrowError(expect.objectContaining({ code: 'WS_PROTOCOL_ERROR' }))

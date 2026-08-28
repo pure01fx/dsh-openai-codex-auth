@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 
-const MAX_SESSION_ITEMS = 2048
+const MAX_OUTPUT_ITEMS = 2048
 const MAX_RESPONSE_ID_BYTES = 256
 const IGNORED_REUSE_FIELDS = new Set([
   'input', 'previous_response_id', 'generate', 'client_metadata',
@@ -17,14 +17,15 @@ export interface NativeCodexWebSocketRequestPlan {
 
 interface CompletedRequest {
   propertyHash: string
-  inputHashes: string[]
-  outputHashes: string[]
+  contextLength: number
+  contextHash: string
   responseId: string
 }
 
 interface PendingRequest {
   propertyHash: string
-  inputHashes: string[]
+  inputLength: number
+  inputHash: string
 }
 
 function failure(message: string, code = 'WS_PROTOCOL_ERROR'): LlmError {
@@ -42,25 +43,38 @@ function digest(value: unknown): string {
   return createHash('sha256').update(canonical(value)).digest('base64url')
 }
 
-function requestParts(request: Record<string, unknown>): {
-  propertyHash: string; input: unknown[]; inputHashes: string[]
+const EMPTY_SEQUENCE_HASH = digest([])
+
+/** Match ordered prefixes without retaining one hash per historical input item. */
+function extendSequenceHash(sequenceHash: string, items: readonly unknown[]): string {
+  let current = sequenceHash
+  for (const item of items) {
+    current = createHash('sha256')
+      .update(current).update(String.fromCharCode(0)).update(digest(item))
+      .digest('base64url')
+  }
+  return current
+}
+
+function requestParts(request: Record<string, unknown>, prefixLength?: number): {
+  propertyHash: string; input: unknown[]; inputHash: string; prefixHash?: string
 } {
   if (!Array.isArray(request.input)) throw failure('native Codex WebSocket input is invalid', 'INVALID_ARGS')
-  if (request.input.length > MAX_SESSION_ITEMS) {
-    throw failure('native Codex WebSocket input has too many items', 'REQUEST_TOO_LARGE')
-  }
   const properties = Object.fromEntries(
     Object.entries(request).filter(([key]) => !IGNORED_REUSE_FIELDS.has(key)),
   )
+  let inputHash = EMPTY_SEQUENCE_HASH
+  let prefixHash = prefixLength === 0 ? inputHash : undefined
+  for (let index = 0; index < request.input.length; index++) {
+    inputHash = extendSequenceHash(inputHash, [request.input[index]])
+    if (index + 1 === prefixLength) prefixHash = inputHash
+  }
   return {
     propertyHash: digest(properties),
     input: request.input,
-    inputHashes: request.input.map(digest),
+    inputHash,
+    ...(prefixHash === undefined ? {} : { prefixHash }),
   }
-}
-
-function hasPrefix(current: readonly string[], prefix: readonly string[]): boolean {
-  return prefix.length <= current.length && prefix.every((value, index) => current[index] === value)
 }
 
 /** One socket chain. Reset it whenever the socket reconnects or a request fails. */
@@ -69,17 +83,18 @@ export class NativeCodexWebSocketSessionState {
   private pending: PendingRequest | undefined
 
   plan(request: Record<string, unknown>, allowEmptySuffix = false): NativeCodexWebSocketRequestPlan {
-    const current = requestParts(request)
-    const prefix = this.completed === undefined
-      ? undefined
-      : [...this.completed.inputHashes, ...this.completed.outputHashes]
+    const prefixLength = this.completed?.contextLength
+    const current = requestParts(request, prefixLength)
     const reusable = this.completed !== undefined
       && this.completed.propertyHash === current.propertyHash
-      && prefix !== undefined
-      && hasPrefix(current.inputHashes, prefix)
-      && (allowEmptySuffix || current.input.length > prefix.length)
-    this.pending = { propertyHash: current.propertyHash, inputHashes: current.inputHashes }
-    if (!reusable || prefix === undefined || this.completed === undefined) {
+      && current.prefixHash === this.completed.contextHash
+      && (allowEmptySuffix || current.input.length > this.completed.contextLength)
+    this.pending = {
+      propertyHash: current.propertyHash,
+      inputLength: current.input.length,
+      inputHash: current.inputHash,
+    }
+    if (!reusable || this.completed === undefined) {
       return { payload: { type: 'response.create', ...request }, incremental: false }
     }
     return {
@@ -87,7 +102,7 @@ export class NativeCodexWebSocketSessionState {
         type: 'response.create',
         ...request,
         previous_response_id: this.completed.responseId,
-        input: current.input.slice(prefix.length),
+        input: current.input.slice(this.completed.contextLength),
       },
       incremental: true,
       previousResponseId: this.completed.responseId,
@@ -105,14 +120,15 @@ export class NativeCodexWebSocketSessionState {
       this.reset()
       throw failure('native Codex WebSocket completion identity is invalid')
     }
-    if (outputItems.length > MAX_SESSION_ITEMS) {
+    if (outputItems.length > MAX_OUTPUT_ITEMS) {
       this.reset()
       throw failure('native Codex WebSocket response has too many items')
     }
     this.completed = {
-      ...this.pending,
+      propertyHash: this.pending.propertyHash,
+      contextLength: this.pending.inputLength + outputItems.length,
+      contextHash: extendSequenceHash(this.pending.inputHash, outputItems),
       responseId,
-      outputHashes: outputItems.map(digest),
     }
     this.pending = undefined
   }

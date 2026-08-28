@@ -10,6 +10,7 @@
         { "effort": "medium", "description": "medium" },
         { "effort": "high", "description": "high" }
       ],
+      "multi_agent_reasoning_effort": "high",
       "shell_type": "shell_command",
       "visibility": "list",
       "minimal_client_version": [0, 99, 0],

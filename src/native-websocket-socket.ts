@@ -2,6 +2,10 @@
 import { LlmError, ProviderRequestId } from '@deepseek-ai/dsh-llm'
 import type { IncomingHttpHeaders } from 'node:http'
 import { nativeCodexEndpoint } from './endpoint.js'
+import {
+  NATIVE_CODEX_CONNECTION_FAILED_CODE,
+  isNativeCodexConnectionFailure,
+} from './native-adapter.js'
 import WebSocket from 'ws'
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
@@ -34,6 +38,12 @@ export interface NativeCodexWebSocketFactory {
 
 function failure(message: string, code: string, cause?: unknown): LlmError {
   return new LlmError(message, code, cause === undefined ? undefined : { cause })
+}
+
+function abortFailure(signal?: AbortSignal): LlmError {
+  return signal?.reason instanceof LlmError
+    ? signal.reason
+    : failure('native Codex WebSocket request was aborted', 'ABORTED')
 }
 
 function handshakeFacts(
@@ -129,14 +139,14 @@ class NodeNativeCodexWebSocket implements NativeCodexWebSocket {
   }
 
   async send(text: string, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) throw failure('native Codex WebSocket request was aborted', 'ABORTED')
+    if (signal?.aborted) throw abortFailure(signal)
     if (this.ended || this.socket.readyState !== WebSocket.OPEN) {
       throw failure('native Codex WebSocket is closed', 'WS_RETRYABLE')
     }
     await new Promise<void>((resolve, reject) => {
       const abort = (): void => {
         this.socket.terminate()
-        reject(failure('native Codex WebSocket request was aborted', 'ABORTED'))
+        reject(abortFailure(signal))
       }
       signal?.addEventListener('abort', abort, { once: true })
       this.socket.send(text, (error) => {
@@ -148,7 +158,7 @@ class NodeNativeCodexWebSocket implements NativeCodexWebSocket {
   }
 
   async receive(signal?: AbortSignal): Promise<NativeCodexWebSocketFrame> {
-    if (signal?.aborted) throw failure('native Codex WebSocket request was aborted', 'ABORTED')
+    if (signal?.aborted) throw abortFailure(signal)
     const queued = this.queue.shift()
     if (queued !== undefined) {
       this.queuedBytes -= queued.bytes
@@ -161,7 +171,7 @@ class NodeNativeCodexWebSocket implements NativeCodexWebSocket {
         const index = this.waiters.indexOf(waiter)
         if (index >= 0) this.waiters.splice(index, 1)
         this.socket.terminate()
-        reject(failure('native Codex WebSocket request was aborted', 'ABORTED'))
+        reject(abortFailure(signal))
       }
       waiter = {
         resolve: (frame) => { signal?.removeEventListener('abort', abort); resolve(frame) },
@@ -183,7 +193,7 @@ export class NodeNativeCodexWebSocketFactory implements NativeCodexWebSocketFact
   async connect(options: NativeCodexWebSocketConnectOptions): Promise<NativeCodexWebSocket> {
     const timeout = positive(options.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS, 'connect timeout')
     const maximum = positive(options.maxFrameBytes, DEFAULT_MAX_FRAME_BYTES, 'frame limit')
-    if (options.signal?.aborted) throw failure('native Codex WebSocket request was aborted', 'ABORTED')
+    if (options.signal?.aborted) throw abortFailure(options.signal)
     return new Promise((resolve, reject) => {
       const responseHeaders: Record<string, string> = {}
       const socket = new WebSocket(nativeCodexWebSocketUrl(options.url), {
@@ -194,7 +204,7 @@ export class NodeNativeCodexWebSocketFactory implements NativeCodexWebSocketFact
       })
       const abort = (): void => {
         socket.terminate()
-        reject(failure('native Codex WebSocket request was aborted', 'ABORTED'))
+        reject(abortFailure(options.signal))
       }
       options.signal?.addEventListener('abort', abort, { once: true })
       socket.on('upgrade', (response) => {
@@ -226,7 +236,13 @@ export class NodeNativeCodexWebSocketFactory implements NativeCodexWebSocketFact
       })
       socket.on('error', (error) => {
         options.signal?.removeEventListener('abort', abort)
-        reject(failure('native Codex WebSocket connection failed', 'WS_RETRYABLE', error))
+        if (isNativeCodexConnectionFailure(error)) {
+          reject(failure(
+            'native Codex WebSocket connection failed', NATIVE_CODEX_CONNECTION_FAILED_CODE, error,
+          ))
+          return
+        }
+        reject(failure('native Codex WebSocket handshake failed', 'WS_HANDSHAKE', error))
       })
     })
   }

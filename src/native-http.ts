@@ -15,7 +15,12 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { nativeCodexAuthorityHash, type NativeCodexCredential } from './catalog.js'
 import { nativeCodexEndpoint } from './endpoint.js'
-import type { NativeCodexTransportMode } from './native-adapter.js'
+import {
+  NATIVE_CODEX_CONNECTION_FAILED_CODE,
+  NATIVE_CODEX_STREAM_INTERRUPTED_CODE,
+  isNativeCodexConnectionFailure,
+  type NativeCodexTransportMode,
+} from './native-adapter.js'
 import {
   boundedCodexTurnState,
   codexRequestBody,
@@ -26,6 +31,17 @@ import {
   type ResolvedToolResultPart,
 } from './responses.js'
 import { hasNativeCodexReplayKind } from './replay.js'
+import {
+  parseCodexResponseUsageMetadata,
+  publishCodexResponseUsage,
+  type CodexResponseUsageCallback,
+} from './response-usage.js'
+import {
+  parseCodexRateLimitEvent,
+  parseCodexRateLimitHeaders,
+  publishCodexRateLimits,
+  type CodexRateLimitCallback,
+} from './rate-limits.js'
 
 export const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
@@ -33,6 +49,8 @@ const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 const DEFAULT_MAX_TRANSIENT_RETRIES = 4
 const DEFAULT_INITIAL_RETRY_DELAY_MS = 200
 const DEFAULT_MAX_RETRY_DELAY_MS = 10_000
+const INITIAL_CONNECTION_RETRY_DELAY_MS = 5_000
+const MAX_CONNECTION_RETRY_DELAY_MS = 60_000
 const DEFAULT_MAX_REQUEST_BODY_BYTES = 24 * 1024 * 1024
 const MAX_ERROR_BODY_BYTES = 64 * 1024
 
@@ -60,6 +78,8 @@ export interface NativeCodexHttpOptions {
   sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>
   createRequestId?: () => string
   onCompleted?: () => void
+  onRateLimits?: CodexRateLimitCallback
+  onResponseUsage?: CodexResponseUsageCallback
   warn?: (message: string) => void
 }
 
@@ -68,7 +88,9 @@ function aborted(message = 'native Codex request was aborted'): LlmError {
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw aborted()
+  if (!signal?.aborted) return
+  if (signal.reason instanceof LlmError) throw signal.reason
+  throw aborted()
 }
 
 function fixedFailure(message: string, code: string, options?: ConstructorParameters<typeof LlmError>[2]): LlmError {
@@ -106,7 +128,9 @@ function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
     const abort = (): void => {
       clearTimeout(timer)
       signal?.removeEventListener('abort', abort)
-      reject(aborted('native Codex retry wait was aborted'))
+      const reason = signal?.reason
+      reject(reason instanceof LlmError
+        ? reason : aborted('native Codex retry wait was aborted'))
     }
     function done(): void {
       signal?.removeEventListener('abort', abort)
@@ -204,6 +228,9 @@ async function resolveMessages(
   const messages: ResolvedMessage[] = []
   for (const message of generation.messages) {
     const content: ResolvedContentPart[] = []
+    const source = message.source
+    const sourceKind: unknown = (source as { kind?: unknown } | undefined)?.kind
+    const subagentSettlement = message.role === 'user' && sourceKind === 'subagent-settled'
     for (const block of message.content) {
       throwIfAborted(generation.signal)
       switch (block.type) {
@@ -211,10 +238,11 @@ async function resolveMessages(
           content.push(block)
           break
         case 'reasoning':
-          if (message.role !== 'assistant') {
-            throw fixedFailure('native Codex reasoning history requires assistant messages', 'INVALID_ARGS')
-          }
-          content.push(block)
+          // DSH may relay an assistant's complete output as user-role context (for
+          // example, a background subagent settlement notice). Keep reasoning only
+          // where native replay can consume it; never promote relayed reasoning to
+          // user input or reject the otherwise valid context message.
+          if (message.role === 'assistant') content.push(block)
           break
         case 'image':
           if (message.role !== 'user') {
@@ -223,10 +251,12 @@ async function resolveMessages(
           content.push(await resolveImage(block, options, generation.signal))
           break
         case 'tool-call':
-          if (message.role !== 'assistant') {
+          if (message.role === 'assistant') content.push(block)
+          else if (!subagentSettlement) {
             throw fixedFailure('native Codex tool calls require assistant messages', 'INVALID_ARGS')
           }
-          content.push(block)
+          // A settlement copies the child's assistant output into user-role context.
+          // Its tool calls belong to the child and must not become parent wire calls.
           break
         case 'tool-result':
           if (message.role !== 'user') {
@@ -238,7 +268,6 @@ async function resolveMessages(
           throw fixedFailure('native Codex request contains an unsupported content block', 'UNSUPPORTED')
       }
     }
-    const source = message.source
     const replaySource = message.role === 'assistant' && source?.kind === 'model'
       && source.replayState !== undefined && hasNativeCodexReplayKind(source.replayState)
       ? { provider: source.provider, model: source.model, replayState: source.replayState }
@@ -361,14 +390,52 @@ async function httpFailure(
 }
 
 function mappedFailure(error: unknown, watchdog: AttemptWatchdog, parent?: AbortSignal): LlmError {
-  if (parent?.aborted) return aborted()
+  if (parent?.aborted) {
+    return parent.reason instanceof LlmError ? parent.reason : aborted()
+  }
   if (watchdog.timedOut()) return fixedFailure('native Codex request timed out', 'TIMEOUT')
   if (error instanceof LlmError) return error
   return fixedFailure('native Codex transport failed', 'TRANSPORT', { cause: error })
 }
 
+function connectionFailure(
+  error: unknown, watchdog: AttemptWatchdog, parent?: AbortSignal,
+): LlmError | undefined {
+  if (parent?.aborted || watchdog.timedOut()) return undefined
+  if (error instanceof LlmError && error.code === NATIVE_CODEX_CONNECTION_FAILED_CODE) {
+    return error
+  }
+  if (!isNativeCodexConnectionFailure(error)) return undefined
+  return fixedFailure(
+    'native Codex HTTP connection failed', NATIVE_CODEX_CONNECTION_FAILED_CODE, { cause: error },
+  )
+}
+
+function unexpectedRedirect(error: unknown, depth = 0): boolean {
+  if (depth > 4 || typeof error !== 'object' || error === null) return false
+  const candidate = error as { message?: unknown; cause?: unknown }
+  if (candidate.message === 'unexpected redirect') return true
+  return unexpectedRedirect(candidate.cause, depth + 1)
+}
+
 function retryable(error: LlmError): boolean {
   return ['TRANSPORT', 'SERVER', 'TIMEOUT', 'STREAM_CLOSED'].includes(error.code)
+}
+
+function failedStepRetry(error: LlmError): LlmError {
+  const failure = error.failure
+  const providerRetryAfterMs = failure.providerRetryAfterMs === undefined
+    ? undefined : Math.min(failure.providerRetryAfterMs, DEFAULT_MAX_RETRY_DELAY_MS)
+  return fixedFailure(
+    `native Codex response stream was interrupted: ${error.message}`,
+    NATIVE_CODEX_STREAM_INTERRUPTED_CODE,
+    {
+      cause: error,
+      ...(failure.status === undefined ? {} : { status: failure.status }),
+      ...(providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs }),
+      ...(failure.requestId === undefined ? {} : { requestId: failure.requestId }),
+    },
+  )
 }
 
 export interface NativeCodexPreparedRequest {
@@ -425,6 +492,11 @@ export class NativeCodexHttpTransport {
     await (this.options.sleep ?? sleep)(delay, signal)
   }
 
+  private async waitForConnection(delayMs: number, signal?: AbortSignal): Promise<void> {
+    this.options.warn?.(`native Codex network is unavailable; reconnecting in ${delayMs}ms`)
+    await (this.options.sleep ?? sleep)(delayMs, signal)
+  }
+
   endpointUrl(): string { return this.endpoint }
 
   async prepare(
@@ -479,6 +551,7 @@ export class NativeCodexHttpTransport {
       throw fixedFailure('native Codex turn routing state is invalid', 'INVALID_ARGS')
     }
     let transientRetries = 0
+    let connectionRetryDelayMs = INITIAL_CONNECTION_RETRY_DELAY_MS
     let recovered = false
     while (true) {
       throwIfAborted(generation.signal)
@@ -487,6 +560,7 @@ export class NativeCodexHttpTransport {
       )
       let response: Response
       let credential: NativeCodexCredential
+      let fetching = false
       try {
         credential = await this.options.resolveCredential(watchdog.signal)
         throwIfAborted(watchdog.signal)
@@ -498,8 +572,10 @@ export class NativeCodexHttpTransport {
             'FAST_CAPABILITY_UNAVAILABLE',
           )
         }
+        fetching = true
         response = await this.fetchImpl(this.endpoint, {
           method: 'POST',
+          redirect: 'error',
           headers: {
             authorization: `Bearer ${credential.accessToken}`,
             'chatgpt-account-id': credential.accountId,
@@ -518,8 +594,20 @@ export class NativeCodexHttpTransport {
           signal: watchdog.signal,
         })
       } catch (error) {
-        const failure = mappedFailure(error, watchdog, generation.signal)
+        const redirectRejected = fetching && unexpectedRedirect(error)
+        const connection = !redirectRejected
+          ? connectionFailure(error, watchdog, generation.signal) : undefined
+        const failure = redirectRejected
+          ? fixedFailure('native Codex HTTP redirect was rejected', 'INVALID_REQUEST', { cause: error })
+          : connection ?? mappedFailure(error, watchdog, generation.signal)
         watchdog.stop()
+        if (connection !== undefined) {
+          await this.waitForConnection(connectionRetryDelayMs, generation.signal)
+          connectionRetryDelayMs = Math.min(
+            connectionRetryDelayMs * 2, MAX_CONNECTION_RETRY_DELAY_MS,
+          )
+          continue
+        }
         if (retryable(failure) && transientRetries < this.maxRetries) {
           await this.wait(transientRetries++, failure, generation.signal)
           continue
@@ -527,6 +615,12 @@ export class NativeCodexHttpTransport {
         throw failure
       }
 
+      publishCodexRateLimits(
+        credential.accountId,
+        parseCodexRateLimitHeaders(response.headers),
+        this.options.onRateLimits,
+        this.options.warn,
+      )
       if (activeTurnState === undefined) {
         const headerTurnState = boundedCodexTurnState(response.headers.get('x-codex-turn-state'))
         if (headerTurnState !== undefined) {
@@ -536,9 +630,9 @@ export class NativeCodexHttpTransport {
       }
       if (response.status === 401 && !recovered && this.options.recoverCredential !== undefined) {
         try {
-          recovered = true
           await response.body?.cancel(watchdog.signal.reason)
           const changed = await this.options.recoverCredential(credential, watchdog.signal)
+          recovered = true
           watchdog.stop()
           if (changed) continue
           throw fixedFailure(
@@ -547,8 +641,16 @@ export class NativeCodexHttpTransport {
             errorFacts(response, this.maxDelayMs),
           )
         } catch (error) {
-          const failure = mappedFailure(error, watchdog, generation.signal)
+          const connection = connectionFailure(error, watchdog, generation.signal)
+          const failure = connection ?? mappedFailure(error, watchdog, generation.signal)
           watchdog.stop()
+          if (connection !== undefined) {
+            await this.waitForConnection(connectionRetryDelayMs, generation.signal)
+            connectionRetryDelayMs = Math.min(
+              connectionRetryDelayMs * 2, MAX_CONNECTION_RETRY_DELAY_MS,
+            )
+            continue
+          }
           throw failure
         }
       }
@@ -583,6 +685,29 @@ export class NativeCodexHttpTransport {
             this.options.warn?.('native Codex ignored a malformed SSE event')
           },
           onEvent: (event) => {
+            publishCodexResponseUsage(
+              credential.accountId,
+              parseCodexResponseUsageMetadata(event),
+              this.options.onResponseUsage,
+              this.options.warn,
+            )
+            const eventRateLimits = parseCodexRateLimitEvent(event)
+            publishCodexRateLimits(
+              credential.accountId,
+              eventRateLimits === undefined ? [] : [eventRateLimits],
+              this.options.onRateLimits,
+              this.options.warn,
+            )
+            const rawEvent = event as unknown as Record<string, unknown>
+            publishCodexRateLimits(
+              credential.accountId,
+              parseCodexRateLimitHeaders(
+                typeof rawEvent.headers === 'object' && rawEvent.headers !== null
+                  ? rawEvent.headers as Record<string, unknown> : undefined,
+              ),
+              this.options.onRateLimits,
+              this.options.warn,
+            )
             const nextTurnState = codexResponseTurnState(event)
             if (activeTurnState === undefined && nextTurnState !== undefined) {
               activeTurnState = nextTurnState
@@ -611,6 +736,7 @@ export class NativeCodexHttpTransport {
           await this.wait(transientRetries++, failure, generation.signal)
           continue
         }
+        if (emitted && retryable(failure)) throw failedStepRetry(failure)
         throw failure
       } finally {
         watchdog.stop()

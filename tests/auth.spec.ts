@@ -6,6 +6,12 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { request as httpRequest } from 'node:http'
 import OpenAICodexAuth, { internals, type OpenAICodexCredential } from '../src/index.ts'
+import { NativeCodexHttpTransport } from '../src/native-http.ts'
+
+const SUCCESS_SSE = await readFile(
+  new URL('./fixtures/responses-text-usage.sse', import.meta.url),
+  'utf8',
+)
 
 type Handler = (req: any, res: any) => void | Promise<void>
 
@@ -151,7 +157,7 @@ async function createHarness(): Promise<{
   root.provide('webRuntime', { lanAddresses: [], trustedHosts: [] })
   root.provide('credentials', credentials)
   const home = await mkdtemp(join(tmpdir(), 'openai-codex-auth-'))
-  const fiber = await root.plugin(OpenAICodexAuth, { dshHome: home })
+  const fiber = await root.plugin(OpenAICodexAuth, { dshHome: home, nativeAdapter: false })
   await new Promise<void>(resolveBootstrap => { setImmediate(resolveBootstrap) })
   return { root, fiber, web, credentials, home }
 }
@@ -206,6 +212,47 @@ describe('request trust and callback URL', () => {
       host: '127.0.0.1:3080',
       'sec-fetch-site': 'same-origin',
     }), [])).toBe(true)
+  })
+  it('reports native, external, and unavailable Codex route states without guessing an external owner', () => {
+    const runtime = (providers: Array<{ id: string; name: string }>) => ({
+      listProviders: () => providers,
+    })
+    expect(internals.resolveCodexRouteStatus({
+      nativeAdapter: true,
+      nativeCompatibilityRoute: true,
+      nativeWebSocket: true,
+    }, runtime([
+      { id: 'openai-codex', name: 'OpenAI Codex' },
+      { id: 'openai-codex-native', name: 'OpenAI Codex (Native Compatibility)' },
+    ]))).toEqual({
+      provider: 'openai-codex',
+      owner: 'native',
+      active: true,
+      registeredName: 'OpenAI Codex',
+      transport: 'websocket-v2',
+      compatibilityRoute: { configured: true, active: true },
+    })
+    expect(internals.resolveCodexRouteStatus({
+      nativeAdapter: false,
+      nativeCompatibilityRoute: true,
+      nativeWebSocket: true,
+    }, runtime([{ id: 'openai-codex', name: 'Configured Codex route' }]))).toEqual({
+      provider: 'openai-codex',
+      owner: 'external',
+      active: true,
+      registeredName: 'Configured Codex route',
+      compatibilityRoute: { configured: false, active: false },
+    })
+    expect(internals.resolveCodexRouteStatus({
+      nativeAdapter: false,
+      nativeCompatibilityRoute: true,
+      nativeWebSocket: false,
+    }, undefined)).toEqual({
+      provider: 'openai-codex',
+      owner: 'unregistered',
+      active: false,
+      compatibilityRoute: { configured: false, active: false },
+    })
   })
 })
 
@@ -301,6 +348,12 @@ describe('OpenAICodexAuth routes', () => {
     }))
     expect(status.statusCode).toBe(200)
     expect(JSON.parse(status.body)).toMatchObject({
+      route: {
+        provider: 'openai-codex',
+        owner: 'unregistered',
+        active: false,
+        compatibilityRoute: { configured: false, active: false },
+      },
       loggedIn: false,
       loginPending: false,
       browserCallbackUrl: 'http://localhost:1455/auth/callback',
@@ -709,6 +762,9 @@ describe('OpenAICodexAuth routes', () => {
     harness.credentials.value = current.access
     const service = harness.root.openaiCodexAuth as any
     const previous = { accessToken: current.access, accountId: current.accountId }
+    const outage = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('network unavailable'), { code: 'ENETUNREACH' }),
+    })
     const fetchMock = vi.fn()
       .mockImplementationOnce(() => Promise.resolve(new Response(JSON.stringify({
         error: 'invalid_grant',
@@ -716,6 +772,7 @@ describe('OpenAICodexAuth routes', () => {
       .mockImplementationOnce(() => Promise.resolve(new Response(JSON.stringify({
         error: 'temporary_failure',
       }), { status: 500, headers: { 'content-type': 'application/json' } })))
+      .mockImplementationOnce(() => Promise.reject(outage))
     vi.stubGlobal('fetch', fetchMock)
 
     const terminal = await service.recoverNativeCredential(previous).catch((error: unknown) => error)
@@ -731,7 +788,13 @@ describe('OpenAICodexAuth routes', () => {
     expect(transient.message).not.toContain('temporary_failure')
     expect(await readCredential(harness.home)).toEqual(current)
     expect(harness.credentials.value).toBe(current.access)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    const network = await service.recoverNativeCredential(previous).catch((error: unknown) => error)
+    expect(network).toBeInstanceOf(LlmError)
+    expect(network).toMatchObject({ code: 'AUTH', cause: outage })
+    expect(await readCredential(harness.home)).toEqual(current)
+    expect(harness.credentials.value).toBe(current.access)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('refreshes usage after a Codex turn and on explicit status refresh without idle polling', async () => {
@@ -781,6 +844,7 @@ describe('OpenAICodexAuth routes', () => {
       usage: { planType: 'pro', primary: { usedPercent: 28, windowSeconds: 18_000 } },
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: 'error' })
 
     await (harness.root as any).waterfall(agent, 'agent/request', {
       agent, turn: 2, step: 1, signal: new AbortController().signal,
@@ -794,6 +858,247 @@ describe('OpenAICodexAuth routes', () => {
       host: '127.0.0.1:3080',
     }))
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('exposes exact response usage only for the active credential account', async () => {
+    harness = await createHarness()
+    const credential = {
+      access: accessToken('acct_response'), refresh: 'refresh-response',
+      expires: Date.now() + 3_600_000, accountId: 'acct_response',
+    }
+    await writeCredential(harness.home, credential)
+    harness.credentials.value = credential.access
+    const service = harness.root.openaiCodexAuth as any
+    service.setCredentialAccount(credential.accountId)
+    vi.spyOn(Date, 'now').mockReturnValue(4567)
+    service.acceptResponseUsage({
+      accountId: credential.accountId,
+      metadata: { amount: '0.12345678901234567890' },
+    })
+
+    const status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(status.body)).toHaveProperty('responseUsage', {
+      amount: '0.12345678901234567890', observedAt: 4567,
+    })
+
+    service.setCredentialAccount('acct_other')
+    const afterAuthorityChange = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(afterAuthorityChange.body)).not.toHaveProperty('responseUsage')
+  })
+
+  it('uses direct native quota updates and skips the redundant turn-end usage request', async () => {
+    harness = await createHarness()
+    await writeFile(join(harness.home, 'openai-codex-auth.json'), JSON.stringify({
+      version: 1,
+      credential: {
+        access: accessToken(),
+        refresh: 'refresh-token',
+        expires: Date.now() + 3_600_000,
+        accountId: 'acct_test',
+      },
+    }))
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      plan_type: 'pro',
+      rate_limit: {
+        primary_window: { used_percent: 10, limit_window_seconds: 18_000 },
+        secondary_window: { used_percent: 5, limit_window_seconds: 604_800 },
+      },
+      rate_limit_reset_credits: { available_count: 2 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status?refresh=1', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    const agent = { id: 'session-direct-usage', session: { id: 'session-direct-usage' } }
+    const session = { id: 'session-direct-usage' }
+    await (harness.root as any).waterfall(agent, 'agent/request', {
+      agent, turn: 1, step: 1, signal: new AbortController().signal,
+    }, () => Promise.resolve({ provider: 'openai-codex', model: 'gpt-5.6-sol' }))
+    ;(harness.root.openaiCodexAuth as any).acceptRateLimits('acct_test', [{
+      limitId: 'codex',
+      planType: 'plus',
+      primary: { usedPercent: 42, windowSeconds: 18_000, resetAt: 2_000_000_000 },
+      secondary: null,
+      limitReached: false,
+      credits: { hasCredits: true, unlimited: false, balance: '123' },
+    }, {
+      limitId: 'codex_bengalfox',
+      limitName: 'gpt-5.6-sol',
+      primary: { usedPercent: 70, windowSeconds: 86_400 },
+    }])
+    ;(harness.root as any).emit(session, 'session/event', session, {
+      type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, seq: 1, time: Date.now(),
+    })
+
+    const status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(status.body)).toMatchObject({
+      usage: {
+        planType: 'plus',
+        primary: { usedPercent: 42, windowSeconds: 18_000, resetAt: 2_000_000_000 },
+        limitReached: false,
+        resetCredits: 2,
+        credits: { hasCredits: true, unlimited: false, balance: '123' },
+        limits: [
+          {
+            id: 'codex',
+            primary: { usedPercent: 42, windowSeconds: 18_000, resetAt: 2_000_000_000 },
+          },
+          {
+            id: 'codex_bengalfox',
+            name: 'gpt-5.6-sol',
+            primary: { usedPercent: 70, windowSeconds: 86_400 },
+          },
+        ],
+        source: 'response',
+      },
+    })
+    expect(JSON.parse(status.body).usage).not.toHaveProperty('secondary')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await (harness.root as any).waterfall(agent, 'agent/request', {
+      agent, turn: 2, step: 1, signal: new AbortController().signal,
+    }, () => Promise.resolve({ provider: 'openai-codex', model: 'gpt-5.6-sol' }))
+    ;(harness.root.openaiCodexAuth as any).acceptRateLimits('acct_test', [{
+      limitId: 'codex_bengalfox',
+      primary: { usedPercent: 80, windowSeconds: 86_400 },
+    }])
+    ;(harness.root as any).emit(session, 'session/event', session, {
+      type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } }, seq: 2, time: Date.now(),
+    })
+    const fallback = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(fallback.body)).toHaveProperty('usage.source', 'endpoint')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects late direct quota observations from a superseded account authority', async () => {
+    harness = await createHarness()
+    const token = accessToken('acct_current')
+    await writeFile(join(harness.home, 'openai-codex-auth.json'), JSON.stringify({
+      version: 1,
+      credential: {
+        access: token,
+        refresh: 'refresh-token',
+        expires: Date.now() + 3_600_000,
+        accountId: 'acct_current',
+      },
+    }))
+    harness.credentials.value = token
+    await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+
+    const service = harness.root.openaiCodexAuth as any
+    service.acceptRateLimits('acct_stale', [{
+      limitId: 'codex', primary: { usedPercent: 99 },
+    }])
+    let status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(status.body)).not.toHaveProperty('usage')
+
+    service.acceptRateLimits('acct_current', [{
+      limitId: 'codex', primary: { usedPercent: 12 },
+    }])
+    status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(status.body)).toHaveProperty('usage.primary.usedPercent', 12)
+
+    service.setCredentialAccount('acct_old')
+    service.markCodexTurn('session-recovery-race', 7)
+    service.acceptRateLimits('acct_old', [{
+      limitId: 'codex', primary: { usedPercent: 100 },
+    }])
+    service.setCredentialAccount('acct_new')
+    expect(service.consumeCodexTurn('session-recovery-race', 7)).toEqual({
+      receivedDirectUsage: false,
+    })
+  })
+
+  it('falls back to account-B WHAM after account-A response quota precedes HTTP auth recovery', async () => {
+    harness = await createHarness()
+    const accountA = {
+      access: accessToken('acct_a'), refresh: 'refresh-a',
+      expires: Date.now() + 3_600_000, accountId: 'acct_a',
+    }
+    const accountB = {
+      access: accessToken('acct_b'), refresh: 'refresh-b',
+      expires: Date.now() + 3_600_000, accountId: 'acct_b',
+    }
+    await writeCredential(harness.home, accountA)
+    harness.credentials.value = accountA.access
+    const service = harness.root.openaiCodexAuth as any
+    service.setCredentialAccount('acct_a')
+
+    const wham = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      rate_limit: { primary_window: { used_percent: 31 } },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', wham)
+    const transportFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'expired' }), {
+        status: 401,
+        headers: {
+          'content-type': 'application/json',
+          'x-codex-primary-used-percent': '100',
+          'x-codex-primary-window-minutes': '15',
+        },
+      }))
+      .mockResolvedValueOnce(new Response(SUCCESS_SSE, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }))
+    let authority = { accessToken: accountA.access, accountId: accountA.accountId }
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => authority,
+      recoverCredential: async () => {
+        await writeCredential(harness.home, accountB)
+        harness.credentials.value = accountB.access
+        authority = { accessToken: accountB.access, accountId: accountB.accountId }
+        service.setCredentialAccount(accountB.accountId)
+        return true
+      },
+      fetch: transportFetch as typeof fetch,
+      onRateLimits: (observation) => {
+        service.acceptRateLimits(observation.accountId, observation.updates)
+      },
+    })
+
+    const agent = { id: 'session-account-recovery', session: { id: 'session-account-recovery' } }
+    const session = { id: 'session-account-recovery' }
+    await (harness.root as any).waterfall(agent, 'agent/request', {
+      agent, turn: 1, step: 1, signal: new AbortController().signal,
+    }, () => Promise.resolve({ provider: 'openai-codex', model: 'gpt-5.6-sol' }))
+    for await (const _chunk of transport.stream({
+      provider: 'openai-codex', model: 'gpt-5.6-sol', messages: [],
+    })) { /* consume */ }
+    ;(harness.root as any).emit(session, 'session/event', session, {
+      type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, seq: 1, time: Date.now(),
+    })
+
+    await vi.waitFor(() => { expect(wham).toHaveBeenCalledTimes(1) })
+    expect(wham.mock.calls[0]?.[1]).toMatchObject({
+      headers: {
+        authorization: `Bearer ${accountB.access}`,
+        'chatgpt-account-id': 'acct_b',
+      },
+    })
+    const status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    expect(JSON.parse(status.body)).toMatchObject({
+      accountId: 'acct_b',
+      usage: { primary: { usedPercent: 31 }, source: 'endpoint' },
+    })
   })
 
   it('runs a trailing refresh when another Codex turn ends during an active usage request', async () => {
@@ -829,6 +1134,13 @@ describe('OpenAICodexAuth routes', () => {
     await (harness.root as any).waterfall(agent, 'agent/request', {
       agent, turn: 2, step: 1, signal: new AbortController().signal,
     }, () => Promise.resolve({ provider: 'openai-codex', model: 'gpt-5.6-sol' }))
+    ;(harness.root.openaiCodexAuth as any).acceptRateLimits('acct_test', [{
+      limitId: 'codex',
+      credits: { hasCredits: true, unlimited: false, balance: '8' },
+    }, {
+      limitId: 'codex_bengalfox',
+      primary: { usedPercent: 80, windowSeconds: 86_400 },
+    }])
     ;(harness.root as any).emit(session, 'session/event', session, {
       type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } }, seq: 2, time: Date.now(),
     })

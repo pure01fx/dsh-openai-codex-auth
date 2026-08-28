@@ -3,7 +3,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile } from 'node:fs/promises'
 import { LlmError, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { NativeCodexHttpTransport } from '../src/native-http.ts'
-import { NATIVE_CODEX_PROVIDER } from '../src/native-adapter.ts'
+import {
+  NATIVE_CODEX_CONNECTION_FAILED_CODE,
+  NATIVE_CODEX_PROVIDER,
+  NATIVE_CODEX_STREAM_INTERRUPTED_CODE,
+} from '../src/native-adapter.ts'
 import { nativeCodexAuthorityHash, type NativeCodexCredential } from '../src/catalog.ts'
 
 const SUCCESS_SSE = await readFile(
@@ -35,6 +39,11 @@ function successResponse(body = SUCCESS_SSE): Response {
     status: 200,
     headers: { 'content-type': 'text/event-stream', 'x-request-id': 'req_synthetic' },
   })
+}
+
+function networkError(code = 'ECONNREFUSED'): TypeError {
+  const cause = Object.assign(new Error('connect failed'), { code })
+  return new TypeError('fetch failed', { cause })
 }
 
 async function loopback(
@@ -125,6 +134,185 @@ describe('NativeCodexHttpTransport', () => {
       role: 'assistant',
       content: [{ type: 'output_text', text: 'durable answer' }],
     }])
+  })
+
+  it('drops settled subagent reasoning and keeps later human history usable', async () => {
+    let capturedBody: Record<string, any> | undefined
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: (async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body))
+        return successResponse()
+      }) as typeof fetch,
+    })
+
+    await collect(transport.stream(request({
+      messages: [{
+        id: 'message-subagent-settled',
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Background subagent child-session finished.' },
+          { type: 'text', text: 'Its closing message:' },
+          { type: 'reasoning', text: 'private relayed reasoning one' },
+          { type: 'reasoning', text: 'private relayed reasoning two' },
+          {
+            type: 'tool-call', id: 'call_child_settlement',
+            name: 'child_tool', arguments: '{"scope":"child"}',
+          },
+          { type: 'text', text: 'The focused review is complete.' },
+        ],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: 'Background subagent child-session finished.',
+          senderSessionId: 'child-session',
+        },
+      }, {
+        id: 'message-human-retry',
+        role: 'user',
+        content: [{ type: 'text', text: 'Please continue after the settlement.' }],
+        source: { kind: 'user' },
+      }] as unknown as GenerateOptions['messages'],
+    })))
+
+    expect(capturedBody?.input).toEqual([{
+      type: 'message',
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'Background subagent child-session finished.' },
+        { type: 'input_text', text: 'Its closing message:' },
+        { type: 'input_text', text: 'The focused review is complete.' },
+      ],
+    }, {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Please continue after the settlement.' }],
+    }])
+    expect(JSON.stringify(capturedBody)).not.toContain('private relayed reasoning')
+    expect(JSON.stringify(capturedBody)).not.toContain('call_child_settlement')
+  })
+
+  it('still rejects ordinary user-role tool calls', async () => {
+    const fetchMock = vi.fn(async () => successResponse())
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: fetchMock as typeof fetch,
+    })
+
+    const error = await collect(transport.stream(request({
+      messages: [{
+        id: 'message-invalid-user-tool-call',
+        role: 'user',
+        content: [{
+          type: 'tool-call', id: 'call_invalid_user',
+          name: 'parent_tool', arguments: '{}',
+        }],
+        source: { kind: 'user' },
+      }] as unknown as GenerateOptions['messages'],
+    }))).catch((reason: unknown) => reason)
+
+    expect(error).toBeInstanceOf(LlmError)
+    expect(error).toMatchObject({
+      code: 'INVALID_ARGS',
+      message: 'native Codex tool calls require assistant messages',
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('publishes subscription quota from successful and rejected HTTP response headers', async () => {
+    const successUpdate = vi.fn()
+    const success = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: (async () => new Response(SUCCESS_SSE, {
+        status: 200,
+        headers: {
+          'content-type': 'text/event-stream',
+          'x-codex-primary-used-percent': '21',
+          'x-codex-primary-window-minutes': '300',
+        },
+      })) as typeof fetch,
+      onRateLimits: successUpdate,
+    })
+    await collect(success.stream(request()))
+    expect(successUpdate).toHaveBeenCalledWith({
+      accountId: 'acct_synthetic',
+      updates: [{
+        limitId: 'codex',
+        primary: { usedPercent: 21, windowSeconds: 18_000 },
+        limitReached: false,
+      }],
+    })
+
+    const rejectedUpdate = vi.fn()
+    const rejected = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: (async () => new Response('', {
+        status: 429,
+        headers: {
+          'x-codex-primary-used-percent': '100',
+          'x-codex-primary-window-minutes': '15',
+        },
+      })) as typeof fetch,
+      maxTransientRetries: 0,
+      onRateLimits: rejectedUpdate,
+    })
+    await expect(collect(rejected.stream(request()))).rejects.toBeInstanceOf(LlmError)
+    expect(rejectedUpdate).toHaveBeenCalledWith({
+      accountId: 'acct_synthetic',
+      updates: [{
+        limitId: 'codex',
+        primary: { usedPercent: 100, windowSeconds: 900 },
+        limitReached: true,
+      }],
+    })
+  })
+
+  it('accepts a quota control event embedded in an HTTP/SSE stream', async () => {
+    const quota = vi.fn()
+    const control = `data: ${JSON.stringify({
+      type: 'codex.rate_limits',
+      plan_type: 'plus',
+      rate_limits: {
+        primary: { used_percent: 9, window_minutes: 300, reset_at: 1_700_000_000 },
+      },
+    })}\n\n`
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: (async () => successResponse(control + SUCCESS_SSE)) as typeof fetch,
+      onRateLimits: quota,
+    })
+    await collect(transport.stream(request()))
+    expect(quota).toHaveBeenCalledWith({
+      accountId: 'acct_synthetic',
+      updates: [{
+        limitId: 'codex',
+        planType: 'plus',
+        primary: { usedPercent: 9, windowSeconds: 18_000, resetAt: 1_700_000_000 },
+        limitReached: false,
+      }],
+    })
+  })
+
+  it('publishes exact response usage metadata and rejects HTTP redirects', async () => {
+    const usage = vi.fn()
+    const body = SUCCESS_SSE.replace(
+      '"usage":',
+      '"usage_metadata":{"amount":"0.12345678901234567890"},"usage":',
+    )
+    const fetchMock = vi.fn(async () => successResponse(body))
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: fetchMock as typeof fetch,
+      onResponseUsage: usage,
+    })
+
+    await collect(transport.stream(request()))
+
+    expect(usage).toHaveBeenCalledWith({
+      accountId: CREDENTIAL.accountId,
+      metadata: { amount: '0.12345678901234567890' },
+    })
+    expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBe('error')
   })
 
   it('rejects non-loopback plaintext credential endpoints', () => {
@@ -611,6 +799,131 @@ describe('NativeCodexHttpTransport', () => {
     expect(delays).toEqual([200, 400])
   })
 
+  it('waits indefinitely for HTTP network recovery outside the transient budget', async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(networkError())
+      .mockRejectedValueOnce(networkError())
+      .mockRejectedValueOnce(networkError())
+      .mockRejectedValueOnce(networkError())
+      .mockRejectedValueOnce(networkError())
+      .mockRejectedValueOnce(new LlmError(
+        'still offline', NATIVE_CODEX_CONNECTION_FAILED_CODE,
+      ))
+      .mockResolvedValueOnce(successResponse())
+    const delays: number[] = []
+    const warn = vi.fn()
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: fetchMock as typeof fetch,
+      maxTransientRetries: 0,
+      sleep: async delay => { delays.push(delay) },
+      warn,
+    })
+
+    await collect(transport.stream(request()))
+
+    expect(fetchMock).toHaveBeenCalledTimes(7)
+    expect(delays).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000])
+    expect(warn).toHaveBeenCalledTimes(6)
+  })
+
+  it('waits for credential resolution after a wrapped network outage', async () => {
+    let resolutions = 0
+    const resolveCredential = vi.fn(async () => {
+      if (resolutions++ < 2) {
+        throw new LlmError('managed credential refresh failed', 'INVALID_CREDENTIAL', {
+          cause: networkError('ENETUNREACH'),
+        })
+      }
+      return CREDENTIAL
+    })
+    const fetchMock = vi.fn(async () => successResponse())
+    const delays: number[] = []
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential,
+      fetch: fetchMock as typeof fetch,
+      maxTransientRetries: 0,
+      sleep: async delay => { delays.push(delay) },
+    })
+
+    await collect(transport.stream(request()))
+
+    expect(resolveCredential).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(delays).toEqual([5_000, 10_000])
+  })
+
+  it('retries credential recovery network outages without spending the auth attempt', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status: 401 }))
+      .mockResolvedValueOnce(new Response('', { status: 401 }))
+      .mockResolvedValueOnce(successResponse())
+    const recoverCredential = vi.fn()
+      .mockRejectedValueOnce(new LlmError('credential recovery offline', 'AUTH', {
+        cause: networkError('EHOSTUNREACH'),
+      }))
+      .mockResolvedValueOnce(true)
+    const delays: number[] = []
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      recoverCredential,
+      fetch: fetchMock as typeof fetch,
+      maxTransientRetries: 0,
+      sleep: async delay => { delays.push(delay) },
+    })
+
+    await collect(transport.stream(request()))
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(recoverCredential).toHaveBeenCalledTimes(2)
+    expect(delays).toEqual([5_000])
+  })
+
+  it('never treats redirects or malformed request TypeErrors as network outages', async () => {
+    const redirect = new TypeError('fetch failed', {
+      cause: new Error('unexpected redirect'),
+    })
+    const redirectFetch = vi.fn(async () => { throw redirect })
+    const redirected = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: redirectFetch as typeof fetch,
+      maxTransientRetries: 0,
+      sleep: async () => { throw new Error('must not wait') },
+    })
+    await expect(collect(redirected.stream(request())))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(redirectFetch).toHaveBeenCalledTimes(1)
+
+    const malformedFetch = vi.fn(async () => {
+      throw new TypeError('Headers.append: invalid header value')
+    })
+    const malformed = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: malformedFetch as typeof fetch,
+      maxTransientRetries: 0,
+      sleep: async () => { throw new Error('must not wait') },
+    })
+    await expect(collect(malformed.stream(request())))
+      .rejects.toMatchObject({ code: 'TRANSPORT' })
+    expect(malformedFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels promptly while waiting for network recovery', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.fn(async () => { throw networkError() })
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: fetchMock as typeof fetch,
+      maxTransientRetries: 0,
+    })
+    const pending = collect(transport.stream(request({ signal: controller.signal })))
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    controller.abort()
+
+    await expect(pending).rejects.toMatchObject({ code: 'ABORTED' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('cancels promptly while waiting for transient backoff', async () => {
     const controller = new AbortController()
     const fetchMock = vi.fn(async () => new Response('', { status: 503 }))
@@ -701,7 +1014,7 @@ describe('NativeCodexHttpTransport', () => {
     expect(attempts).toBe(2)
   })
 
-  it('never retries after a visible block and preserves the stream-close failure', async () => {
+  it('defers a visible-output stream close to the failed-step retry boundary', async () => {
     const partial = 'data: {"type":"response.output_text.delta","item_id":"msg-partial","delta":"part"}\n\n'
     const fetchMock = vi.fn(async () => successResponse(partial))
     const transport = new NativeCodexHttpTransport({
@@ -723,7 +1036,9 @@ describe('NativeCodexHttpTransport', () => {
       { type: 'text-delta', index: 0, text: 'part' },
     ])
     expect(error).toBeInstanceOf(LlmError)
-    expect(error).toMatchObject({ code: 'STREAM_CLOSED' })
+    expect(error).toMatchObject({ code: NATIVE_CODEX_STREAM_INTERRUPTED_CODE })
+    expect((error as Error & { cause?: unknown }).cause)
+      .toMatchObject({ code: 'STREAM_CLOSED' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 

@@ -1,8 +1,11 @@
 {
   "name": "@pure01fx/dsh-openai-codex-auth",
   "version": "0.6.0",
-  "description": "Device-code-first OpenAI Codex login and same-origin Web integration for DeepSeek Harness",
+  "description": "Native ChatGPT Codex provider, device-code-first login, and same-origin Web integration for DeepSeek Harness",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/pure01fx/dsh-openai-codex-auth.git"
@@ -48,11 +51,18 @@
     "lib/responses.d.ts",
     "lib/replay.js",
     "lib/replay.d.ts",
+    "lib/rate-limits.js",
+    "lib/rate-limits.d.ts",
+    "lib/response-usage.js",
+    "lib/response-usage.d.ts",
+    "lib/upstream.js",
+    "lib/upstream.d.ts",
     "lib/sse.js",
     "lib/sse.d.ts",
+    "lib/usage.js",
+    "lib/usage.d.ts",
     "client.js",
     "cordis.patch.yml",
-    "profiles/native-codex-hu",
     "assets/readme/hero.svg",
     "assets/readme/workflow.svg",
     "README.md",
