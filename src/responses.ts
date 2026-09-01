@@ -16,6 +16,7 @@ import {
 export const DEFAULT_CODEX_INSTRUCTIONS = 'You are Codex, an AI coding agent. Help the user with software engineering tasks.'
 const CALL_ID_MAX_LENGTH = 64
 const CALL_ID_PREFIX = 'call_'
+const MAX_RETAINED_RESPONSE_BYTES = 64 * 1024 * 1024
 
 export interface ResolvedImagePart { type: 'image'; mediaType: string; dataBase64: string }
 export interface ResolvedToolResultPart {
@@ -309,6 +310,7 @@ export class ResponsesStreamTranslator {
   private readonly order: OpenBlock[] = []
   private readonly replayCapture: NativeCodexReplayCapture | undefined
   private nextIndex = 0
+  private retainedBytes = 0
   private sawToolCall = false
   terminated = false
 
@@ -318,9 +320,30 @@ export class ResponsesStreamTranslator {
       : new NativeCodexReplayCapture(replayContext.provider, replayContext.model)
   }
 
+  private reserve(bytes: number): void {
+    const nextBytes = this.retainedBytes + bytes
+    if (!Number.isSafeInteger(nextBytes) || nextBytes > MAX_RETAINED_RESPONSE_BYTES) {
+      throw fixedError('native Codex response retained content exceeded the size limit', 'RESPONSE_TOO_LARGE')
+    }
+    this.retainedBytes = nextBytes
+  }
+
+  private append(block: OpenBlock, delta: string): void {
+    this.reserve(Buffer.byteLength(delta))
+    block.text += delta
+  }
+
+  private fill(block: OpenBlock, text: string): void {
+    if (block.text.length > 0) return
+    this.reserve(Buffer.byteLength(text))
+    block.text = text
+  }
+
   private open(
     key: string, kind: OpenBlock['kind'], chunks: StreamChunk[], callId = '', name?: string,
   ): OpenBlock {
+    this.reserve(128 + Buffer.byteLength(key) + Buffer.byteLength(callId)
+      + (name === undefined ? 0 : Buffer.byteLength(name)))
     const block: OpenBlock = {
       index: this.nextIndex++, kind, text: '', callId,
       ...name === undefined ? {} : { name },
@@ -370,7 +393,7 @@ export class ResponsesStreamTranslator {
         const key = `${eventItemId(event)}:text:${String(event.content_index ?? 0)}`
         const block = this.blocks.get(key) ?? this.open(key, 'text', chunks)
         const delta = eventDelta(event)
-        block.text += delta
+        this.append(block, delta)
         chunks.push({ type: 'text-delta', index: block.index, text: delta })
         return chunks
       }
@@ -378,7 +401,7 @@ export class ResponsesStreamTranslator {
         const key = `${eventItemId(event)}:summary:${String(event.summary_index ?? 0)}`
         const block = this.blocks.get(key) ?? this.open(key, 'reasoning', chunks)
         const delta = eventDelta(event)
-        block.text += delta
+        this.append(block, delta)
         chunks.push({ type: 'reasoning-delta', index: block.index, text: delta })
         return chunks
       }
@@ -391,7 +414,7 @@ export class ResponsesStreamTranslator {
           throw fixedError('native Codex function arguments have no open call', 'MALFORMED_RESPONSE')
         }
         const delta = eventDelta(event)
-        block.text += delta
+        this.append(block, delta)
         chunks.push({
           type: 'tool-call-delta', index: block.index, id: CallId(block.callId),
           ...block.name === undefined ? {} : { name: block.name }, argumentsDelta: delta,
@@ -421,7 +444,7 @@ export class ResponsesStreamTranslator {
           }
           block.callId = item.call_id
           block.name = item.name
-          if (block.text.length === 0) block.text = item.arguments
+          this.fill(block, item.arguments)
           this.close(key, chunks)
           if (this.replayContext !== undefined) this.replayCapture?.add({
             type: 'function_call', ...(replayId === undefined ? {} : { id: replayId }),
@@ -443,7 +466,7 @@ export class ResponsesStreamTranslator {
             if (block.text.length > 0 && block.text !== part.text) {
               throw fixedError('native Codex text changed during streaming', 'MALFORMED_RESPONSE')
             }
-            if (block.text.length === 0) block.text = part.text
+            this.fill(block, part.text)
             refs.push(block.index)
             this.close(key, chunks)
           }
@@ -473,7 +496,7 @@ export class ResponsesStreamTranslator {
             if (block.text.length > 0 && block.text !== text) {
               throw fixedError('native Codex reasoning summary changed during streaming', 'MALFORMED_RESPONSE')
             }
-            if (block.text.length === 0) block.text = text
+            this.fill(block, text)
             refs.push(block.index)
             this.close(key, chunks)
           }
@@ -520,7 +543,7 @@ export class ResponsesStreamTranslator {
             } } }
           : {
               type: 'finish', reason: { kind: this.sawToolCall ? 'tool-calls' : 'stop' },
-              ...(replayState === undefined ? {} : { replayState }),
+              ...(replayState === undefined ? {} : { replayState: { response: replayState } }),
             })
         return chunks
       }
@@ -555,8 +578,6 @@ export interface StreamResponsesOptions extends ParseSseOptions {
   onMalformedEvent?: () => void
   onEvent?: (event: ResponsesStreamEvent) => void
   replayContext?: ResponsesReplayContext
-  maxResponseBytes?: number
-  maxResponseEvents?: number
 }
 
 /** Validate one opaque sticky turn token before retaining or forwarding it. */
@@ -592,29 +613,8 @@ export function codexResponseTurnState(event: ResponsesStreamEvent): string | un
 export async function* streamResponses(
   stream: ReadableStream<Uint8Array>, options: StreamResponsesOptions = {},
 ): AsyncGenerator<StreamChunk> {
-  const byteLimit = options.maxResponseBytes ?? 24 * 1024 * 1024
-  const eventLimit = options.maxResponseEvents ?? 4096
-  if (!Number.isSafeInteger(byteLimit) || byteLimit <= 0 || byteLimit > 24 * 1024 * 1024
-    || !Number.isSafeInteger(eventLimit) || eventLimit <= 0 || eventLimit > 4096) {
-    throw fixedError('native Codex response limit is invalid', 'INVALID_CONFIG')
-  }
-  let responseBytes = 0
-  let responseEvents = 0
   const translator = new ResponsesStreamTranslator(options.replayContext)
-  for await (const frame of parseSse(stream, {
-    ...options,
-    onBytes: (bytes) => {
-      options.onBytes?.(bytes)
-      responseBytes += bytes
-      if (responseBytes > byteLimit) {
-        throw fixedError('native Codex response exceeded the size limit', 'RESPONSE_TOO_LARGE')
-      }
-    },
-  })) {
-    responseEvents += 1
-    if (responseEvents > eventLimit) {
-      throw fixedError('native Codex response had too many events', 'RESPONSE_TOO_LARGE')
-    }
+  for await (const frame of parseSse(stream, options)) {
     let event: ResponsesStreamEvent
     try { event = JSON.parse(frame.data) as ResponsesStreamEvent } catch {
       options.onMalformedEvent?.()

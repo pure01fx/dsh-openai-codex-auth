@@ -43,8 +43,8 @@ import {
 import { NativeCodexWebSocketSessionState } from './native-websocket-session.js'
 
 const WS_BETA = 'responses_websockets=2026-02-06'
-const DEFAULT_IDLE_TIMEOUT_MS = 30_000
-const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024
+const DEFAULT_IDLE_TIMEOUT_MS = 300_000
+const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024
 const DEFAULT_MAX_SESSIONS = 32
 const DEFAULT_SESSION_IDLE_MS = 30 * 60_000
 const DEFAULT_MAX_RECONNECTS = 5
@@ -53,9 +53,7 @@ const DEFAULT_MAX_RETRY_DELAY_MS = 10_000
 const INITIAL_CONNECTION_RETRY_DELAY_MS = 5_000
 const MAX_CONNECTION_RETRY_DELAY_MS = 60_000
 const MAX_TURN_STATE_BYTES = 4096
-const MAX_EVENTS_PER_RESPONSE = 4096
-const MAX_OUTPUT_ITEMS_PER_RESPONSE = 2048
-const MAX_RESPONSE_BYTES = 24 * 1024 * 1024
+const MAX_RETAINED_OUTPUT_BYTES = 64 * 1024 * 1024
 
 export interface NativeCodexWebSocketTransportOptions extends NativeCodexHttpOptions {
   webSocketFactory?: NativeCodexWebSocketFactory
@@ -286,6 +284,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
   private readonly maxReconnects: number
   private readonly initialRetryDelayMs: number
   private readonly maxRetryDelayMs: number
+  private readonly preparing = new Set<AbortController>()
   private readonly active = new Map<SessionEntry, AbortController>()
   private disposed = false
 
@@ -299,7 +298,8 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
       options.webSocketIdleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS, 60 * 60_000, 'WebSocket idle timeout',
     )
     this.maxFrameBytes = boundedPositive(
-      options.maxWebSocketFrameBytes, DEFAULT_MAX_FRAME_BYTES, MAX_RESPONSE_BYTES, 'WebSocket frame limit',
+      options.maxWebSocketFrameBytes, DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_FRAME_BYTES,
+      'WebSocket frame limit',
     )
     this.maxSessions = boundedPositive(
       options.maxWebSocketSessions, DEFAULT_MAX_SESSIONS, 256, 'WebSocket session limit',
@@ -498,14 +498,9 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
       model: mode.publicModel ?? generation.model,
     })
     const outputItems: Record<string, unknown>[] = []
-    let events = 0
-    let responseBytes = 0
-    while (events++ < MAX_EVENTS_PER_RESPONSE) {
+    let outputBytes = 0
+    while (true) {
       const text = await this.receive(entry, signal)
-      responseBytes += Buffer.byteLength(text)
-      if (responseBytes > MAX_RESPONSE_BYTES) {
-        throw failure('native Codex WebSocket response exceeded the size limit', 'WS_RESPONSE_TOO_LARGE')
-      }
       let event: ResponsesStreamEvent
       try { event = JSON.parse(text) as ResponsesStreamEvent } catch {
         this.options.warn?.('native Codex ignored a malformed WebSocket event')
@@ -546,10 +541,12 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
       }
       const output = normalizedOutputItem(event)
       if (output !== undefined) {
-        if (outputItems.length >= MAX_OUTPUT_ITEMS_PER_RESPONSE) {
-          throw failure('native Codex WebSocket response had too many output items', 'WS_RESPONSE_TOO_LARGE')
+        const nextOutputBytes = outputBytes + Buffer.byteLength(JSON.stringify(output))
+        if (nextOutputBytes > MAX_RETAINED_OUTPUT_BYTES) {
+          throw failure('native Codex WebSocket retained output exceeded the size limit', 'WS_RESPONSE_TOO_LARGE')
         }
         outputItems.push(output)
+        outputBytes = nextOutputBytes
       }
       if (event.type === 'response.completed') {
         const response = typeof (event as unknown as Record<string, unknown>).response === 'object'
@@ -566,7 +563,6 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
         return
       }
     }
-    throw failure('native Codex WebSocket response had too many events', 'WS_PROTOCOL_ERROR')
   }
 
   private async *attempt(
@@ -603,7 +599,17 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
     generation: GenerateOptions, mode: NativeCodexTransportMode = {},
   ): AsyncIterable<StreamChunk> {
     if (this.disposed) throw failure('native Codex WebSocket transport was disposed', 'DISPOSED')
-    const prepared = await this.http.prepare(generation, mode)
+    const lifecycle = new AbortController()
+    const signal = generation.signal === undefined
+      ? lifecycle.signal : AbortSignal.any([generation.signal, lifecycle.signal])
+    const activeGeneration = { ...generation, signal }
+    this.preparing.add(lifecycle)
+    let prepared: NativeCodexPreparedRequest
+    try {
+      prepared = await this.http.prepare(activeGeneration, mode)
+    } finally {
+      this.preparing.delete(lifecycle)
+    }
     if (this.disposed) throw failure('native Codex WebSocket transport was disposed', 'DISPOSED')
     const key = sessionKey(generation, prepared.routingId)
     const entry = this.entry(key)
@@ -612,11 +618,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
       throw failure('native Codex WebSocket active session limit was reached', 'WS_SESSION_LIMIT')
     }
     entry.busy = true
-    const lifecycle = new AbortController()
     this.active.set(entry, lifecycle)
-    const signal = generation.signal === undefined
-      ? lifecycle.signal : AbortSignal.any([generation.signal, lifecycle.signal])
-    const activeGeneration = { ...generation, signal }
     const currentTurn = turnKey(generation)
     if (entry.turnKey !== currentTurn) {
       entry.turnKey = currentTurn
@@ -659,17 +661,18 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
           this.closeEntry(entry)
           if (this.disposed) throw failure('native Codex WebSocket transport was disposed', 'DISPOSED')
           if (generation.signal?.aborted || failureValue.code === 'ABORTED') throw failureValue
+          if (emitted) {
+            if (failedStepRetryable(failureValue.code)) throw failedStepRetry(failureValue)
+            throw failureValue
+          }
           if (failureValue.code === NATIVE_CODEX_CONNECTION_FAILED_CODE
-            || isNativeCodexConnectionFailure(failureValue)) {
+            || (attemptedCredential === undefined
+              && isNativeCodexConnectionFailure(failureValue))) {
             await this.waitForConnection(connectionRetryDelayMs, signal)
             connectionRetryDelayMs = Math.min(
               connectionRetryDelayMs * 2, MAX_CONNECTION_RETRY_DELAY_MS,
             )
             continue
-          }
-          if (emitted) {
-            if (failedStepRetryable(failureValue.code)) throw failedStepRetry(failureValue)
-            throw failureValue
           }
           if (failureValue.code === 'WS_AUTH' && !recovered
             && attemptedCredential !== undefined
@@ -728,6 +731,10 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    for (const controller of this.preparing) {
+      controller.abort(failure('native Codex WebSocket transport was disposed', 'DISPOSED'))
+    }
+    this.preparing.clear()
     for (const [entry, controller] of this.active) {
       controller.abort(failure('native Codex WebSocket transport was disposed', 'DISPOSED'))
       this.closeEntry(entry)

@@ -17,6 +17,8 @@
 
 ## 快速开始
 
+当前 `0.7.x` 版本要求 DeepSeek Harness `0.1.1-rc.2`；仍运行 DSH `0.1.0-rc.6` 的 profile 应继续使用插件 `0.6.1`。
+
 将插件安装到 DSH 的 `web` profile：
 
 ```sh

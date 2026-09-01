@@ -439,11 +439,13 @@ describe('NativeCodexHttpTransport', () => {
           type: 'finish',
           reason: { kind: 'stop' },
           replayState: {
-            kind: 'openai-codex-native.responses-replay',
-            version: 1,
-            provider: NATIVE_CODEX_PROVIDER,
-            model: 'gpt-test',
-            items: [{ type: 'message', id: 'msg_redacted', blocks: [0] }],
+            response: {
+              kind: 'openai-codex-native.responses-replay',
+              version: 1,
+              provider: NATIVE_CODEX_PROVIDER,
+              model: 'gpt-test',
+              items: [{ type: 'message', id: 'msg_redacted', blocks: [0] }],
+            },
           },
         },
       ])

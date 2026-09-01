@@ -25,6 +25,7 @@ export declare class NativeCodexWebSocketTransport implements NativeCodexTranspo
     private readonly maxReconnects;
     private readonly initialRetryDelayMs;
     private readonly maxRetryDelayMs;
+    private readonly preparing;
     private readonly active;
     private disposed;
     constructor(options: NativeCodexWebSocketTransportOptions);

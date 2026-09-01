@@ -8,6 +8,7 @@ async function text(path: string): Promise<string> {
 describe('package integration boundary', () => {
   it('mounts the native-first plugin without shipping profile-specific composition', async () => {
     const root = JSON.parse(await text('../package.json')) as {
+      version: string
       files: string[]
       publishConfig?: { access?: string }
     }
@@ -16,7 +17,7 @@ describe('package integration boundary', () => {
     await expect(text('../profiles/native-codex-hu/package.json'))
       .rejects.toMatchObject({ code: 'ENOENT' })
     expect(await text('../CHANGELOG.md')).toContain(
-      '# Changelog\n\n## Unreleased\n\n## 0.6.0\n',
+      `# Changelog\n\n## Unreleased\n\n## ${root.version}\n`,
     )
     expect(await text('../cordis.patch.yml')).toBe(
       '# Native Codex is the package default. Integration bundles own any removal or\n'

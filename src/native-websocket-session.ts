@@ -2,7 +2,6 @@
 import { createHash } from 'node:crypto'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 
-const MAX_OUTPUT_ITEMS = 2048
 const MAX_RESPONSE_ID_BYTES = 256
 const IGNORED_REUSE_FIELDS = new Set([
   'input', 'previous_response_id', 'generate', 'client_metadata',
@@ -119,10 +118,6 @@ export class NativeCodexWebSocketSessionState {
       || Buffer.byteLength(responseId) > MAX_RESPONSE_ID_BYTES) {
       this.reset()
       throw failure('native Codex WebSocket completion identity is invalid')
-    }
-    if (outputItems.length > MAX_OUTPUT_ITEMS) {
-      this.reset()
-      throw failure('native Codex WebSocket response has too many items')
     }
     this.completed = {
       propertyHash: this.pending.propertyHash,

@@ -3,11 +3,9 @@ import { LlmError, type ContentBlock } from '@deepseek-ai/dsh-llm'
 
 export const NATIVE_CODEX_REPLAY_KIND = 'openai-codex-native.responses-replay'
 export const NATIVE_CODEX_REPLAY_VERSION = 1
-const MAX_REPLAY_DESCRIPTORS = 128
-const MAX_REPLAY_BLOCK_REFS = 256
 const MAX_REPLAY_ITEM_ID_BYTES = 256
-const MAX_REPLAY_CIPHERTEXT_BYTES = 1024 * 1024
-const MAX_REPLAY_STATE_BYTES = 4 * 1024 * 1024
+const MAX_REPLAY_CIPHERTEXT_BYTES = 64 * 1024 * 1024
+const MAX_REPLAY_STATE_BYTES = 64 * 1024 * 1024
 
 export type NativeCodexReplayDescriptor =
   | { type: 'message'; id?: string; blocks: number[] }
@@ -119,14 +117,20 @@ function parseDescriptor(value: unknown): NativeCodexReplayDescriptor {
   throw failure('native Codex replay descriptor type is unsupported')
 }
 
-/** True only for state emitted by this package; foreign adapters degrade to visible history. */
+function replayPayload(value: unknown): unknown {
+  const response = object(value)?.response
+  return object(response)?.kind === NATIVE_CODEX_REPLAY_KIND ? response : value
+}
+
+/** True only for legacy raw state or an rc.2 envelope emitted by this package. */
 export function hasNativeCodexReplayKind(value: unknown): boolean {
-  return object(value)?.kind === NATIVE_CODEX_REPLAY_KIND
+  return object(replayPayload(value))?.kind === NATIVE_CODEX_REPLAY_KIND
 }
 
 function parseState(value: unknown): NativeCodexReplayState {
-  safeStateSize(value, 'INVALID_REPLAY_STATE')
-  const row = object(value)
+  const payload = replayPayload(value)
+  safeStateSize(payload, 'INVALID_REPLAY_STATE')
+  const row = object(payload)
   if (row === undefined || row.kind !== NATIVE_CODEX_REPLAY_KIND
     || row.version !== NATIVE_CODEX_REPLAY_VERSION
     || !onlyKeys(row, ['kind', 'version', 'provider', 'model', 'items'])) {
@@ -135,14 +139,10 @@ function parseState(value: unknown): NativeCodexReplayState {
   const provider = boundedString(row.provider)
   const model = boundedString(row.model, 512)
   if (provider === undefined || model === undefined || !Array.isArray(row.items)
-    || row.items.length === 0 || row.items.length > MAX_REPLAY_DESCRIPTORS) {
+    || row.items.length === 0) {
     throw failure('native Codex replay state metadata is invalid')
   }
   const items = row.items.map(parseDescriptor)
-  const refs = items.reduce((total, item) => total + (
-    item.type === 'function_call' ? 1 : item.blocks.length
-  ), 0)
-  if (refs > MAX_REPLAY_BLOCK_REFS) throw failure('native Codex replay state has too many block references')
   return {
     kind: NATIVE_CODEX_REPLAY_KIND,
     version: NATIVE_CODEX_REPLAY_VERSION,
@@ -152,10 +152,9 @@ function parseState(value: unknown): NativeCodexReplayState {
   }
 }
 
-/** Attempt-local bounded accumulator; no ciphertext can grow unchecked before completion. */
+/** Attempt-local byte-bounded accumulator; no ciphertext can grow unchecked before completion. */
 export class NativeCodexReplayCapture {
   private readonly descriptors: NativeCodexReplayDescriptor[] = []
-  private references = 0
   private stateBytes: number
 
   constructor(
@@ -172,13 +171,6 @@ export class NativeCodexReplayCapture {
   }
 
   add(item: NativeCodexReplayDescriptor): void {
-    if (this.descriptors.length >= MAX_REPLAY_DESCRIPTORS) {
-      throw failure('native Codex response has too many replay descriptors', 'MALFORMED_RESPONSE')
-    }
-    const addedReferences = item.type === 'function_call' ? 1 : item.blocks.length
-    if (this.references + addedReferences > MAX_REPLAY_BLOCK_REFS) {
-      throw failure('native Codex response has too many replay block references', 'MALFORMED_RESPONSE')
-    }
     if (item.type === 'reasoning' && item.encryptedContent !== undefined
       && Buffer.byteLength(item.encryptedContent) > MAX_REPLAY_CIPHERTEXT_BYTES) {
       throw failure('native Codex encrypted reasoning exceeded the replay limit', 'MALFORMED_RESPONSE')
@@ -189,7 +181,6 @@ export class NativeCodexReplayCapture {
       throw failure('native Codex replay state exceeded the size limit', 'REPLAY_STATE_TOO_LARGE')
     }
     this.descriptors.push(item)
-    this.references += addedReferences
     this.stateBytes = nextBytes
   }
 

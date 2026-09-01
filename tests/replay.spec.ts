@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
-import { CallId, type ContentBlock, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, CallId, type ContentBlock, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   codexRequestBody,
   streamResponses,
@@ -43,7 +43,9 @@ function finishState(chunks: readonly StreamChunk[]): NativeCodexReplayState {
   if (finish?.type !== 'finish' || finish.replayState === undefined) {
     throw new Error('expected replay state')
   }
-  return finish.replayState as NativeCodexReplayState
+  const response = finish.replayState.response
+  if (typeof response !== 'object' || response === null) throw new Error('expected replay response')
+  return response as NativeCodexReplayState
 }
 
 describe('native Codex continuation replay', () => {
@@ -74,6 +76,21 @@ describe('native Codex continuation replay', () => {
     expect(durable).not.toContain('lookup')
     expect(durable).not.toContain('call_redacted')
     expect(durable).not.toContain('key')
+  })
+
+  it('round-trips successful replay through the rc.2 BlockAssembler envelope', async () => {
+    const chunks = await collect(streamResponses(bytes(TOOL_REASONING_SSE), {
+      replayContext: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base' },
+    }))
+    const assembler = new BlockAssembler()
+    for (const chunk of chunks) assembler.push(chunk)
+
+    expect(assembler.replayState).toEqual({ response: finishState(chunks) })
+    expect(replayAssistantInput(assembler.blocks(), {
+      provider: NATIVE_CODEX_PROVIDER,
+      model: 'gpt-base',
+      replayState: assembler.replayState,
+    }).map(item => item.type)).toEqual(['reasoning', 'function_call'])
   })
 
   it('replays reasoning, call, and following tool output exactly once in wire order', async () => {
@@ -221,11 +238,16 @@ describe('native Codex continuation replay', () => {
       { type: 'message', blocks: [0] },
     ])!
     const content: ContentBlock[] = [{ type: 'text', text: 'ok' }]
-    expect(replayAssistantInput(content, {
-      provider: NATIVE_CODEX_PROVIDER,
-      model: 'gpt-base',
-      replayState: JSON.parse(JSON.stringify(valid)),
-    })).toEqual([{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }])
+    for (const replayState of [
+      JSON.parse(JSON.stringify(valid)),
+      { response: JSON.parse(JSON.stringify(valid)) },
+    ]) {
+      expect(replayAssistantInput(content, {
+        provider: NATIVE_CODEX_PROVIDER,
+        model: 'gpt-base',
+        replayState,
+      })).toEqual([{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }])
+    }
 
     for (const replayState of [
       { ...valid, provider: 'foreign' },
@@ -243,62 +265,51 @@ describe('native Codex continuation replay', () => {
     }
   })
 
-  it('enforces replay limits while completed items are still streaming', async () => {
-    const manyItems = Array.from({ length: 129 }, (_, index) => [
+  it('accepts long replay metadata while completed items are streaming', async () => {
+    const manyItems = Array.from({ length: 2_049 }, (_, index) => [
       `data: ${JSON.stringify({
         type: 'response.output_item.done',
         item: { type: 'reasoning', id: `rs_${index}`, summary: [] },
       })}`,
       '',
-    ]).flat().concat('').join('\n')
+    ]).flat().concat([
+      'data: {"type":"response.completed","response":{}}', '', '',
+    ]).join('\n')
     await expect(collect(streamResponses(bytes(manyItems), {
       replayContext: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base' },
-    }))).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+    }))).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'finish' })]))
 
-    const oversized = [
+    const largeCiphertext = [
       `data: ${JSON.stringify({
         type: 'response.output_item.done',
         item: {
           type: 'reasoning', id: 'rs_large', summary: [],
-          encrypted_content: 'x'.repeat(1024 * 1024 + 1),
+          encrypted_content: 'x'.repeat(2 * 1024 * 1024),
         },
-      })}`, '', '',
+      })}`,
+      '', 'data: {"type":"response.completed","response":{}}', '', '',
     ].join('\n')
-    await expect(collect(streamResponses(bytes(oversized), {
-      maxEventBytes: 2 * 1024 * 1024,
+    await expect(collect(streamResponses(bytes(largeCiphertext), {
       replayContext: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base' },
-    }))).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+    }))).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'finish' })]))
   })
 
-  it('enforces descriptor and encrypted-content bounds', () => {
+  it('accepts long descriptor, block-reference, and encrypted-content state', () => {
     expect(createNativeCodexReplayState(NATIVE_CODEX_PROVIDER, 'gpt-base', [{
-      type: 'reasoning', blocks: [], encryptedContent: 'x'.repeat(1024 * 1024),
+      type: 'reasoning', blocks: [], encryptedContent: 'x'.repeat(2 * 1024 * 1024),
     }])).toBeDefined()
-    expect(() => createNativeCodexReplayState(NATIVE_CODEX_PROVIDER, 'gpt-base', [{
-      type: 'reasoning', blocks: [], encryptedContent: 'x'.repeat(1024 * 1024 + 1),
-    }])).toThrowError()
-    expect(() => createNativeCodexReplayState(
+    expect(createNativeCodexReplayState(
       NATIVE_CODEX_PROVIDER,
       'gpt-base',
-      Array.from({ length: 129 }, () => ({ type: 'reasoning' as const, blocks: [] })),
-    )).toThrowError()
+      Array.from({ length: 2_049 }, () => ({ type: 'reasoning' as const, blocks: [] })),
+    )).toBeDefined()
     expect(createNativeCodexReplayState(NATIVE_CODEX_PROVIDER, 'gpt-base', [{
       type: 'message', id: 'i_' + 'x'.repeat(254),
-      blocks: Array.from({ length: 256 }, (_, index) => index),
+      blocks: Array.from({ length: 2_049 }, (_, index) => index),
     }])).toBeDefined()
     expect(() => createNativeCodexReplayState(NATIVE_CODEX_PROVIDER, 'gpt-base', [{
-      type: 'message', id: 'i_' + 'x'.repeat(255),
-      blocks: Array.from({ length: 257 }, (_, index) => index),
+      type: 'message', id: 'i_' + 'x'.repeat(255), blocks: [],
     }])).toThrowError()
-    expect(() => createNativeCodexReplayState(
-      NATIVE_CODEX_PROVIDER,
-      'gpt-base',
-      Array.from({ length: 5 }, () => ({
-        type: 'reasoning' as const,
-        blocks: [],
-        encryptedContent: 'x'.repeat(1024 * 1024),
-      })),
-    )).toThrowError(expect.objectContaining({ code: 'REPLAY_STATE_TOO_LARGE' }))
   })
 
   it('rejects malformed completed reasoning summaries and ciphertext', async () => {

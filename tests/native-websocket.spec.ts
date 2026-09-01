@@ -118,6 +118,7 @@ describe('NativeCodexWebSocketTransport', () => {
       webSocketFactory: factory,
       fetch: fetchMock as typeof fetch,
     })
+    expect((transport as unknown as { idleTimeoutMs: number }).idleTimeoutMs).toBe(300_000)
 
     const first = await collect(transport.stream(firstRequest()))
     const assistant = createAssistantMessage({
@@ -138,6 +139,7 @@ describe('NativeCodexWebSocketTransport', () => {
     expect(factory.options).toHaveLength(1)
     expect(factory.options[0]).toMatchObject({
       url: 'https://chatgpt.com/backend-api/codex/responses',
+      maxFrameBytes: 64 * 1024 * 1024,
       headers: {
         authorization: 'Bearer synthetic-token',
         'chatgpt-account-id': 'synthetic-account',
@@ -320,6 +322,45 @@ describe('NativeCodexWebSocketTransport', () => {
     })
   })
 
+  it('does not limit aggregate WebSocket event count', async () => {
+    const ignored = Array.from({ length: 4_097 }, (_, sequenceNumber) => JSON.stringify({
+      type: 'response.unknown', sequence_number: sequenceNumber,
+    }))
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([socket([
+        completed('resp_warm'),
+        ...ignored,
+        ...textResponse('resp_many', 'msg_many', 'done'),
+      ])]),
+      fetch: vi.fn(async () => response()) as typeof fetch,
+    })
+
+    await expect(collect(transport.stream(firstRequest()))).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'finish' })]),
+    )
+  })
+
+  it('does not limit WebSocket output item count', async () => {
+    const outputItems = Array.from({ length: 2_049 }, (_, index) => JSON.stringify({
+      type: 'response.output_item.done',
+      item: { type: 'message', id: `msg_${String(index)}`, content: [] },
+    }))
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([socket([
+        completed('resp_warm'),
+        ...outputItems,
+        completed('resp_many_items'),
+      ])]),
+      fetch: vi.fn(async () => response()) as typeof fetch,
+    })
+
+    await expect(collect(transport.stream(firstRequest()))).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'finish' })]),
+    )
+  })
+
   it('reconnects with a full create without repeating prewarm', async () => {
     const closed = new ScriptedSocket([{ type: 'close', code: 1011, reason: 'retry' }])
     const recovered = socket(textResponse('resp_success', 'msg_success', 'ok'))
@@ -495,6 +536,40 @@ describe('NativeCodexWebSocketTransport', () => {
     await expect(pending).rejects.toMatchObject({ code: 'DISPOSED' })
   })
 
+  it('preserves DISPOSED while image request preparation is pending', async () => {
+    const readImage = vi.fn((_attachment: unknown, signal?: AbortSignal) =>
+      new Promise<{ data: Uint8Array }>((_resolve, reject) => {
+        const abort = (): void => { reject(signal?.reason ?? new Error('aborted')) }
+        if (signal?.aborted) abort()
+        else signal?.addEventListener('abort', abort, { once: true })
+      }))
+    const factory = new ScriptedFactory([])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      readImage,
+      webSocketFactory: factory,
+    })
+    const pending = collect(transport.stream({
+      ...firstRequest(),
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'image',
+          attachment: {
+            attachmentId: 'attachment-pending', mediaType: 'image/png', bytes: 3,
+            width: 1, height: 1,
+          },
+        }],
+      }] as unknown as GenerateOptions['messages'],
+    }))
+    await vi.waitFor(() => expect(readImage).toHaveBeenCalledTimes(1))
+
+    transport.dispose()
+
+    await expect(pending).rejects.toMatchObject({ code: 'DISPOSED' })
+    expect(factory.options).toHaveLength(0)
+  })
+
   it('preserves DISPOSED through a pending HTTP fallback', async () => {
     const fetchMock = vi.fn((_input: URL | RequestInfo, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
@@ -612,6 +687,38 @@ describe('NativeCodexWebSocketTransport', () => {
     expect((error as Error & { cause?: unknown }).cause)
       .toMatchObject({ code: 'WS_RETRYABLE_RESET' })
     expect(secondFetch).not.toHaveBeenCalled()
+  })
+
+  it('never replays a post-output socket reset inside the same stream', async () => {
+    const reset = Object.assign(new Error('socket reset'), { code: 'ECONNRESET' })
+    const partial = new ScriptedSocket([
+      { type: 'text', text: completed('resp_warm_reset') },
+      { type: 'text', text: JSON.stringify({
+        type: 'response.output_text.delta', item_id: 'msg_reset', delta: 'part',
+      }) },
+      new LlmError('established socket failed', 'WS_RETRYABLE', { cause: reset }),
+    ])
+    const unused = socket(textResponse('resp_unused', 'msg_unused', 'must-not-run'))
+    const factory = new ScriptedFactory([partial, unused])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: factory,
+      sleep: async () => { throw new Error('must not reconnect in-stream') },
+    })
+    const chunks: StreamChunk[] = []
+    const error = await (async () => {
+      try {
+        for await (const chunk of transport.stream(firstRequest())) chunks.push(chunk)
+      } catch (caught) { return caught }
+    })()
+
+    expect(chunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'part' },
+    ])
+    expect(error).toMatchObject({ code: NATIVE_CODEX_STREAM_INTERRUPTED_CODE })
+    expect(factory.options).toHaveLength(1)
+    expect(unused.sent).toEqual([])
   })
 
   it('recovers one handshake credential and enforces Fast account authority', async () => {

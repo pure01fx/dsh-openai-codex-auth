@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.7.1
+
+### Native stream compatibility
+
+- Aligns long native Codex streams with codex-rs by removing aggregate event/wire-byte, output-item, and replay-item ceilings, using a 300-second WebSocket idle timeout, and retaining 64 MiB single-event/frame, queued-byte, translated-content, retained-output, and replay-state safeguards.
+
+## 0.7.0
+
+### DSH 0.1.1 compatibility
+
+- Targets DeepSeek Harness `0.1.1-rc.2` across Host peers, runtime helpers, development contracts, and generated artifacts.
+- Emits successful native continuation metadata through the rc.2 `ReplayEnvelope.response` contract while continuing to read legacy raw replay state from existing sessions.
+- Removes the duplicate runtime dependency on `@deepseek-ai/dsh-credentials`, keeping the Host credentials service as a peer-owned singleton.
+
+## 0.6.1
+
+### WebSocket reliability
+
+- Cancels image and attachment request preparation when the transport is disposed, preserving the `DISPOSED` lifecycle result before a WebSocket session becomes active.
+- Stops same-stream reconnect and replay after any output has been emitted; retryable interruptions now cross the durable failed-step recovery boundary without duplicating visible chunks.
+- Keeps credential-backed connection failures on the bounded reconnect and HTTP fallback path instead of treating every low-level network error as an indefinite pre-credential outage.
+
 ## 0.6.0
 
 ### Native Codex transport

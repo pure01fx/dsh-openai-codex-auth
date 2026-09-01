@@ -1,7 +1,7 @@
 /** Bounded, cancellable Server-Sent Events byte framing. */
 import { LlmError } from '@deepseek-ai/dsh-llm'
 
-export const DEFAULT_MAX_SSE_EVENT_BYTES = 1024 * 1024
+export const DEFAULT_MAX_SSE_EVENT_BYTES = 64 * 1024 * 1024
 
 export interface SseEvent {
   data: string

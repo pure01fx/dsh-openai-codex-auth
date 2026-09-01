@@ -473,11 +473,13 @@ describe('NativeCodexAdapter catalog boundary', () => {
           type: 'finish',
           reason: { kind: 'stop' },
           replayState: {
-            kind: 'openai-codex-native.responses-replay',
-            version: 1,
-            provider: CODEX_PROVIDER,
-            model: 'catalog/model-fast',
-            items: [{ type: 'message', blocks: [0] }],
+            response: {
+              kind: 'openai-codex-native.responses-replay',
+              version: 1,
+              provider: CODEX_PROVIDER,
+              model: 'catalog/model-fast',
+              items: [{ type: 'message', blocks: [0] }],
+            },
           },
         },
       ])

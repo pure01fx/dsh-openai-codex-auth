@@ -13,7 +13,7 @@ import {
   toResponsesInput,
   type ResolvedMessage,
 } from '../src/responses.ts'
-import { parseSse } from '../src/sse.ts'
+import { DEFAULT_MAX_SSE_EVENT_BYTES, parseSse } from '../src/sse.ts'
 
 const LF = String.fromCharCode(10)
 const CRLF = String.fromCharCode(13, 10)
@@ -355,24 +355,35 @@ describe('SSE framing and stream translation', () => {
     expect(activity.mock.calls.length).toBeGreaterThanOrEqual(4)
   })
 
-  it('bounds aggregate SSE bytes and event count', async () => {
-    await expect(collect(streamResponses(bytes([
-      `: ${'a'.repeat(60)}${LF}`,
-      `: ${'b'.repeat(60)}${LF}`,
-    ]), {
-      maxEventBytes: 80,
-      maxResponseBytes: 100,
-    }))).rejects.toMatchObject({ code: 'RESPONSE_TOO_LARGE' })
+  it('does not limit aggregate SSE bytes or event count', async () => {
+    const valid = await readFile(new URL('./fixtures/responses-done-only.sse', import.meta.url), 'utf8')
+    let responseBytes = 0
+    const oneMiBComment = `: ${'a'.repeat(1024 * 1024 - 4)}${LF}${LF}`
+    expect(await collect(streamResponses(bytes([
+      ...Array.from({ length: 25 }, () => oneMiBComment),
+      valid,
+    ]), { onBytes: bytesRead => { responseBytes += bytesRead } }))).toEqual([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'Done only.' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+    expect(responseBytes).toBeGreaterThan(24 * 1024 * 1024)
 
     const malformed = `data: {}${LF}${LF}`
-    await expect(collect(streamResponses(bytes([
-      malformed, malformed, malformed,
-    ]), {
-      maxResponseEvents: 2,
-    }))).rejects.toMatchObject({ code: 'RESPONSE_TOO_LARGE' })
+    const onMalformedEvent = vi.fn()
+    expect(await collect(streamResponses(bytes([
+      ...Array.from({ length: 4_097 }, () => malformed),
+      valid,
+    ]), { onMalformedEvent }))).toEqual([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'Done only.' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+    expect(onMalformedEvent).toHaveBeenCalledTimes(4_097)
   })
 
   it('fails fixedly on oversize events and cancellation', async () => {
+    expect(DEFAULT_MAX_SSE_EVENT_BYTES).toBe(64 * 1024 * 1024)
     await expect(collect(streamResponses(bytes([`data: 1234567890${LF}${LF}`]), {
       maxEventBytes: 8,
     }))).rejects.toMatchObject({

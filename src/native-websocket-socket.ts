@@ -9,9 +9,8 @@ import {
 import WebSocket from 'ws'
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
-const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024
-const MAX_QUEUED_FRAMES = 4096
-const MAX_QUEUED_BYTES = 24 * 1024 * 1024
+const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024
+const MAX_QUEUED_BYTES = 64 * 1024 * 1024
 
 export type NativeCodexWebSocketFrame =
   | { type: 'text'; text: string }
@@ -120,7 +119,7 @@ class NodeNativeCodexWebSocket implements NativeCodexWebSocket {
       else waiter.resolve(value)
       return
     }
-    if (this.queue.length >= MAX_QUEUED_FRAMES || this.queuedBytes + bytes > MAX_QUEUED_BYTES) {
+    if (this.queuedBytes + bytes > MAX_QUEUED_BYTES) {
       this.fail(failure('native Codex WebSocket queued too much response data', 'WS_RESPONSE_TOO_LARGE'))
       return
     }

@@ -100,9 +100,13 @@ export declare class ResponsesStreamTranslator {
     private readonly order;
     private readonly replayCapture;
     private nextIndex;
+    private retainedBytes;
     private sawToolCall;
     terminated: boolean;
     constructor(replayContext?: ResponsesReplayContext | undefined);
+    private reserve;
+    private append;
+    private fill;
     private open;
     private close;
     private closeItem;
@@ -114,8 +118,6 @@ export interface StreamResponsesOptions extends ParseSseOptions {
     onMalformedEvent?: () => void;
     onEvent?: (event: ResponsesStreamEvent) => void;
     replayContext?: ResponsesReplayContext;
-    maxResponseBytes?: number;
-    maxResponseEvents?: number;
 }
 /** Validate one opaque sticky turn token before retaining or forwarding it. */
 export declare function boundedCodexTurnState(value: unknown): string | undefined;
