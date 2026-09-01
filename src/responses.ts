@@ -163,7 +163,12 @@ function assertSupportedOptions(options: GenerateOptions): void {
   if (options.temperature !== undefined) {
     throw fixedError('native Codex does not support temperature', 'UNSUPPORTED')
   }
-  if (options.maxTokens !== undefined) {
+  // DSH's compaction and title helpers always carry a bounded output budget, but
+  // Codex's native Responses wire has no corresponding request field. Accept the
+  // hint only for those purpose-tagged auxiliary calls and leave it off the wire.
+  if (options.maxTokens !== undefined
+    && options.purpose !== 'compaction'
+    && options.purpose !== 'session-title') {
     throw fixedError('native Codex does not support maxTokens', 'UNSUPPORTED')
   }
   if (options.stop !== undefined) {

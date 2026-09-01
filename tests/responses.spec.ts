@@ -146,6 +146,14 @@ describe('Responses request translation', () => {
     expect(errorOf(() => codexRequestBody(options(controls), []))).toMatchObject({ code: 'UNSUPPORTED' })
   })
 
+  it.each(['compaction', 'session-title'] as const)(
+    'accepts the required %s output budget without adding a native wire control',
+    (purpose) => {
+      expect(codexRequestBody(options({ purpose, maxTokens: 8_192 }), []))
+        .toEqual(codexRequestBody(options({ purpose }), []))
+    },
+  )
+
   it('rejects invalid and assistant-side resolved images with fixed diagnostics', () => {
     expect(errorOf(() => codexRequestBody(options(), [{
       role: 'user', content: [{ type: 'image', mediaType: 'text/plain', dataBase64: 'x' }],

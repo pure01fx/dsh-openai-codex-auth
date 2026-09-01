@@ -399,6 +399,7 @@ describe('NativeCodexHttpTransport', () => {
         system: 'explicit system',
         reasoningEffort: 'medium' as GenerateOptions['reasoningEffort'],
         purpose: 'compaction',
+        maxTokens: 8_192,
         tools: [{
           name: 'lookup', description: 'Lookup a key',
           parameters: { type: 'object', properties: { key: { type: 'string' } } },

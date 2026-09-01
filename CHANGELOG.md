@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.7.2
+
+### Auxiliary-call compatibility
+
+- Accepts DSH's purpose-tagged compaction and session-title `maxTokens` budgets without serializing an unsupported Native Codex output-cap field, while ordinary model calls continue to reject unsupported explicit caps.
+- Restores automatic compaction for long Native Codex sessions that previously accumulated failed `compaction/end` events.
+
 ## 0.7.1
 
 ### Native stream compatibility
