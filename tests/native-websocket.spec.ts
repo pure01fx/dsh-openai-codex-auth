@@ -762,6 +762,53 @@ describe('NativeCodexWebSocketTransport', () => {
     expect(rejectedFactory.options).toHaveLength(0)
   })
 
+  it('rejects a cross-account credential after WebSocket recovery', async () => {
+    let credential = { accessToken: 'token-a', accountId: 'account-a' }
+    const factory = new ScriptedFactory([
+      new LlmError('unauthorized', 'WS_AUTH'),
+      socket(textResponse('resp_unused', 'msg_unused', 'must not run')),
+    ])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => credential,
+      recoverCredential: async () => {
+        credential = { accessToken: 'token-b', accountId: 'account-b' }
+        return true
+      },
+      webSocketFactory: factory,
+    })
+
+    await expect(collect(transport.stream(firstRequest()))).rejects.toMatchObject({
+      code: 'AUTH', message: 'native Codex account changed during request',
+    })
+    expect(factory.options).toHaveLength(1)
+  })
+
+  it('carries the account pin into HTTP fallback', async () => {
+    let credential = { accessToken: 'token-a', accountId: 'account-a' }
+    let connects = 0
+    const webSocketFactory: NativeCodexWebSocketFactory = {
+      connect: vi.fn(async () => {
+        connects += 1
+        if (connects === 2) credential = { accessToken: 'token-b', accountId: 'account-b' }
+        throw new LlmError('socket unavailable', 'WS_RETRYABLE')
+      }),
+    }
+    const fetchMock = vi.fn(async () => response())
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => credential,
+      webSocketFactory,
+      fetch: fetchMock as typeof fetch,
+      maxWebSocketReconnects: 0,
+      sleep: async () => {},
+    })
+
+    await expect(collect(transport.stream(firstRequest()))).rejects.toMatchObject({
+      code: 'AUTH', message: 'native Codex account changed during request',
+    })
+    expect(webSocketFactory.connect).toHaveBeenCalledTimes(2)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('closes and resets a pooled socket when the consumer stops early', async () => {
     const abandoned = socket([
       completed('resp_warm_abandoned'),

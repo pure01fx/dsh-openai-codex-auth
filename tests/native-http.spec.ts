@@ -629,7 +629,7 @@ describe('NativeCodexHttpTransport', () => {
       fetch: switchedFetch as typeof fetch,
     })
     await expect(collect(switchedTransport.stream(request(), mode)))
-      .rejects.toMatchObject({ code: 'FAST_CAPABILITY_UNAVAILABLE' })
+      .rejects.toMatchObject({ code: 'AUTH', message: 'native Codex account changed during request' })
     expect(switchedFetch).toHaveBeenCalledTimes(1)
   })
 
@@ -741,7 +741,7 @@ describe('NativeCodexHttpTransport', () => {
         : successResponse()
     })
     const recoverCredential = vi.fn(async () => {
-      credential = { accessToken: 'synthetic-rotated-secret', accountId: 'acct_rotated' }
+      credential = { accessToken: 'synthetic-rotated-secret', accountId: CREDENTIAL.accountId }
       return true
     })
     const resolveCredential = vi.fn(async () => credential)
@@ -763,6 +763,24 @@ describe('NativeCodexHttpTransport', () => {
       'Bearer ' + CREDENTIAL.accessToken,
       'Bearer synthetic-rotated-secret',
     ])
+  })
+
+  it('rejects a cross-account credential after HTTP recovery', async () => {
+    let credential = CREDENTIAL
+    const fetchMock = vi.fn(async () => new Response('', { status: 401 }))
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => credential,
+      recoverCredential: async () => {
+        credential = { accessToken: 'account-b-token', accountId: 'account-b' }
+        return true
+      },
+      fetch: fetchMock as typeof fetch,
+    })
+
+    await expect(collect(transport.stream(request()))).rejects.toMatchObject({
+      code: 'AUTH', message: 'native Codex account changed during request',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('attempts credential recovery only once before returning AUTH', async () => {

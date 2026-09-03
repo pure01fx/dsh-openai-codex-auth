@@ -553,6 +553,7 @@ export class NativeCodexHttpTransport {
     let transientRetries = 0
     let connectionRetryDelayMs = INITIAL_CONNECTION_RETRY_DELAY_MS
     let recovered = false
+    let pinnedAccountId = mode.pinnedAccountId
     while (true) {
       throwIfAborted(generation.signal)
       const watchdog = attemptWatchdog(
@@ -564,6 +565,10 @@ export class NativeCodexHttpTransport {
       try {
         credential = await this.options.resolveCredential(watchdog.signal)
         throwIfAborted(watchdog.signal)
+        if (pinnedAccountId === undefined) pinnedAccountId = credential.accountId
+        else if (credential.accountId !== pinnedAccountId) {
+          throw fixedFailure('native Codex account changed during request', 'AUTH')
+        }
         if (mode.serviceTier !== undefined
           && (mode.authorityHash === undefined
             || nativeCodexAuthorityHash(credential.accountId) !== mode.authorityHash)) {

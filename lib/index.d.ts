@@ -7,12 +7,23 @@ import { CODEX_PROVIDER } from './native-adapter.js';
 export { CODEX_PROVIDER, NATIVE_CODEX_PROVIDER } from './native-adapter.js';
 export { normalizeUsage } from './usage.js';
 export { CODEX_CLIENT_VERSION, TRACKED_CODEX_COMMIT, TRACKED_CODEX_RELEASE, TRACKED_CODEX_REPOSITORY, } from './upstream.js';
-/** Persisted OAuth credential. */
+/** Persisted OAuth credential for one ChatGPT account. */
 export interface OpenAICodexCredential {
     access: string;
     refresh: string;
     expires: number;
     accountId: string;
+    email?: string;
+}
+/** Current multi-account credential document. */
+export interface OpenAICodexCredentialDocument {
+    version: 2;
+    currentAccountId: string | null;
+    accounts: OpenAICodexCredential[];
+}
+interface ParsedCredentialDocument {
+    document: OpenAICodexCredentialDocument;
+    migrated: boolean;
 }
 /** Plugin configuration. */
 export interface Config {
@@ -73,6 +84,8 @@ interface TokenResponse {
     id_token?: unknown;
 }
 declare function parseTokenResponse(value: TokenResponse | null, previous?: OpenAICodexCredential): OpenAICodexCredential;
+declare function parseCredentialDocument(text: string, filename: string): ParsedCredentialDocument;
+declare function currentCredential(document: OpenAICodexCredentialDocument | undefined): OpenAICodexCredential | undefined;
 declare function parseAuthority(authority: string | undefined): URL | undefined;
 declare function isLoopbackHostname(hostname: string): boolean;
 declare function isTrustedHost(authority: string | undefined, trustedHosts: readonly string[]): boolean;
@@ -85,6 +98,8 @@ declare function pollDeviceAuthorization(device: DeviceAuthorization, signal?: A
 declare function resolveCodexRouteStatus(config: NativeRouteConfig, llm: RouteRuntime | undefined): CodexRouteStatus;
 export declare const internals: {
     parseTokenResponse: typeof parseTokenResponse;
+    parseCredentialDocument: typeof parseCredentialDocument;
+    currentCredential: typeof currentCredential;
     parseAuthority: typeof parseAuthority;
     isLoopbackHostname: typeof isLoopbackHostname;
     isTrustedHost: typeof isTrustedHost;
@@ -138,9 +153,11 @@ export declare class OpenAICodexAuth extends Service {
     private restorePublishedCredential;
     private publicationChangedError;
     private failAfterPublicationRollback;
+    private commitDocument;
+    private upsertCurrentCredential;
     private commitCredential;
     private resolveManagedCredentialLocked;
-    /** Return a valid managed bearer token, refreshing and persisting it when near expiry. */
+    /** Return the current managed bearer token, refreshing and migrating it when needed. */
     bearerToken(signal?: AbortSignal): Promise<string | undefined>;
     private externalNativeCredential;
     private resolveNativeCredential;
@@ -154,6 +171,8 @@ export declare class OpenAICodexAuth extends Service {
     private beginBrowserLogin;
     private createBrowserLogin;
     private cancelLogin;
+    private resetCurrentAccountState;
+    private setCurrentAccount;
     private logout;
     private status;
     private fetchUsage;
@@ -169,6 +188,9 @@ export declare class OpenAICodexAuth extends Service {
     private handleBrowserComplete;
     private handleCallback;
     private handleCancel;
+    private accountIdBody;
+    private handleSetCurrentAccount;
+    private handleAccountLogout;
     private handleLogout;
 }
 export default OpenAICodexAuth;

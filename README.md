@@ -48,6 +48,14 @@ dsh web
 
 设备码登录无需 OAuth callback，适合本机、SSH 隧道和 HTTPS 反向代理场景。
 
+## 多账号切换
+
+- 已登录后继续点击 **用设备码添加账号** 或 **用浏览器添加账号**，可追加 ChatGPT 账号；新登录的账号会自动成为当前账号。
+- 设置页的 **已添加账号** 列表支持设为当前和单独移除。切换是全局的，只影响切换完成后的新 Codex 请求；已开始的请求继续使用启动时绑定的账号。
+- 移除当前账号时，插件按账号列表顺序选择下一个账号；移除最后一个账号后会清除 `DSH_OPENAI_CODEX_TOKEN`。
+- 原有单账号 `version: 1` 凭据会在首次读取时原子迁移为 `version: 2` 多账号文档，无需重新登录。
+- 如果 `DSH_OPENAI_CODEX_TOKEN` 来自只读环境变量或其他外部 authority，插件会拒绝需要改写当前 token 的登录、切换和退出操作，避免界面与实际请求账号不一致。
+
 ## 两种登录方式
 
 ### 设备码登录（推荐）
@@ -82,6 +90,7 @@ http://localhost:1455/auth/callback
 | --- | --- |
 | 设备码登录 | 无本机 callback，支持远程/headless 使用 |
 | 浏览器 OAuth fallback | PKCE + state、端到端 1455 探测、手动 code 回填和临时 callback listener |
+| 多账号管理 | 添加多个 OAuth 账号、全局切换当前账号、单独移除，并自动迁移旧单账号凭据 |
 | Codex 用量面板 | 展示短周期与周用量、剩余额度和重置时间；Native 模式直接接收 Codex 返回的套餐额度，`wham/usage` 仅作初始读取和 fallback |
 | 当前路由状态 | 设置页显示 `openai-codex` 当前由本插件 Native Adapter、外部 Adapter 或无人持有；Native 模式同时显示 WebSocket v2 或 HTTP/SSE |
 | 输入框额度圈 | 登录后显示在输入框右下角；悬停或键盘聚焦显示用量，点击圆圈强制刷新，不做常驻额度轮询 |
@@ -99,9 +108,9 @@ http://localhost:1455/auth/callback
 
 登录成功后：
 
-1. 凭据以 owner-only 权限原子写入 `$DSH_HOME/openai-codex-auth.json`。
-2. access token 通过 DSH credentials 注入 `DSH_OPENAI_CODEX_TOKEN`。
-3. `openai-codex` 模型提供方在请求时读取该凭据。
+1. 多账号凭据以 owner-only 权限原子写入 `$DSH_HOME/openai-codex-auth.json`；文档保存账号列表与全局当前账号指针。
+2. 当前账号的 access token 通过 DSH credentials 注入 `DSH_OPENAI_CODEX_TOKEN`。
+3. `openai-codex` 模型提供方在每个请求开始时读取当前凭据，并把该次尝试固定到同一个账号。
 4. 输入框右下角显示 Codex 额度圈；悬停或键盘聚焦显示当前用量，点击才强制刷新。Native transport 优先消费 WebSocket `codex.rate_limits` 事件或 HTTP `x-codex-*` headers，未收到直接更新时才在 turn 结束后读取 `wham/usage`。
 5. 设置页与额度圈只读取登录状态、账号 ID、过期时间和用量摘要，不接触 token。
 
@@ -111,13 +120,15 @@ http://localhost:1455/auth/callback
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| GET | `/openai-codex/status` | 登录、flow、用量和 CSRF 状态 |
+| GET | `/openai-codex/status` | 登录、账号列表、当前账号、flow、用量和 CSRF 状态 |
+| POST | `/openai-codex/accounts/current` | 以 `{ "accountId": "…" }` 设定全局当前账号 |
+| POST | `/openai-codex/accounts/logout` | 以 `{ "accountId": "…" }` 单独移除账号 |
 | POST | `/openai-codex/device/start` | 创建或复用设备码 flow |
 | POST | `/openai-codex/browser/prepare` | 创建浏览器 flow，返回授权 URL 和一次性 1455 探测 URL |
 | POST | `/openai-codex/browser/complete` | 接收用户粘贴的 callback URL 或 authorization code |
 | GET | `/openai-codex/browser/start` | 兼容入口：直接启动并跳转浏览器 OAuth |
 | POST | `/openai-codex/cancel` | 取消当前登录、关闭临时 listener，保留旧凭据 |
-| POST | `/openai-codex/logout` | 取消 flow 并删除本地凭据 |
+| POST | `/openai-codex/logout` | 兼容入口：取消 flow 并移除当前账号 |
 
 1456 已完全退役。1455 平时关闭，仅浏览器 OAuth pending 时绑定 loopback；设备码登录完全不使用它。
 

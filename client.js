@@ -665,7 +665,38 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const mutateAccount = async (path, accountId, action) => {
+        if (busy) return
+        setBusy(action + ':' + accountId)
+        setError('')
+        try {
+          await post(path, { accountId })
+          await load(false)
+        } catch (mutationError) {
+          setError(messageOf(mutationError))
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const setCurrentAccount = async (accountId) => {
+        await mutateAccount('/accounts/current', accountId, 'current')
+      }
+
+      const removeAccount = async (accountId) => {
+        const account = accounts.find((candidate) => candidate.accountId === accountId)
+        const label = account && account.email ? account.email : shortAccount(accountId)
+        const isCurrent = account && (account.current === true || account.accountId === currentAccountId)
+        const isLast = accounts.length === 1
+        const consequence = isLast
+          ? '移除后将退出 Codex，重新使用需要再次完成 OAuth 登录。'
+          : isCurrent ? '移除后会自动切换到列表中的下一个账号。' : '该账号的本地 OAuth 凭据会被删除。'
+        if (!window.confirm('确定移除 ' + label + '？\n\n' + consequence)) return
+        await mutateAccount('/accounts/logout', accountId, 'remove')
+      }
+
       const logout = async () => {
+        if (busy) return
         setBusy('logout')
         probeGeneration.current += 1
         try {
@@ -701,6 +732,10 @@ window.__ModuleLoader__.load({
       const usage = status && status.usage
       const loading = status === null && !error
       const connected = Boolean(status && status.loggedIn)
+      const accounts = status && Array.isArray(status.accounts) ? status.accounts : []
+      const currentAccountId = status && status.currentAccountId
+      const currentAccount = accounts.find((account) => account.current === true || account.accountId === currentAccountId)
+      const currentAccountLabel = currentAccount && currentAccount.email ? currentAccount.email : shortAccount(status && status.accountId)
       const pending = Boolean(status && status.loginPending) || watchLogin
       const devicePending = Boolean(status && status.loginMethod === 'device' && status.device)
       const browserPending = Boolean(status && status.loginMethod === 'browser' && status.browser)
@@ -731,7 +766,7 @@ window.__ModuleLoader__.load({
               h('div', { className: 'codexLogo', 'aria-hidden': true }, 'OA'),
               h('div', null,
                 h('h3', { className: 'codexName' }, 'OpenAI Codex 订阅'),
-                h('p', { className: 'codexMeta', title: connected ? status.accountId : '' }, loading ? '正在读取 OpenAI 登录状态' : connected ? shortAccount(status.accountId) : '尚未连接 ChatGPT 账号'),
+                h('p', { className: 'codexMeta', title: connected ? status.accountId : '' }, loading ? '正在读取 OpenAI 登录状态' : connected ? currentAccountLabel : '尚未连接 ChatGPT 账号'),
               ),
             ),
             h('span', { className: 'codexBadge ' + (loading || pending ? 'pending' : connected ? 'connected' : '') },
@@ -749,6 +784,31 @@ window.__ModuleLoader__.load({
                   ),
                   h('div', { className: 'codexRouteValue' }, route.title + ' · ' + route.value),
                   h('p', { className: 'codexRouteDetail' }, route.detail),
+                )
+              : null,
+            !loading && accounts.length > 0
+              ? h('div', { className: 'codexModelVisibility' },
+                  h('div', { className: 'codexModelVisibilityHead' },
+                    h('strong', null, '已添加账号'),
+                    h('span', { className: 'codexMeta' }, accounts.length + ' 个'),
+                  ),
+                  h('p', { className: 'codexModelVisibilityHint' }, '当前账号用于新的 Codex 请求；你可以切换或单独移除任意账号。'),
+                  h('div', { className: 'codexModelVisibilityList' }, accounts.map((account) => {
+                    const isCurrent = account.current === true || account.accountId === currentAccountId
+                    const accountBusy = busy === 'current:' + account.accountId || busy === 'remove:' + account.accountId
+                    return h('div', { className: 'codexModelVisibilityOption', key: account.accountId },
+                      h('span', { title: account.accountId },
+                        h('strong', null, account.email || shortAccount(account.accountId)),
+                        account.email ? h('span', null, ' · ' + shortAccount(account.accountId)) : null,
+                        h('span', null, isCurrent ? ' · 当前账号' : ''),
+                        account.expiresAt ? h('span', null, ' · 到期 ' + new Date(account.expiresAt).toLocaleString()) : null,
+                      ),
+                      h('div', { className: 'codexActions' },
+                        !isCurrent ? h('button', { type: 'button', className: 'codexButton', disabled: Boolean(busy), onClick: () => { void setCurrentAccount(account.accountId) } }, accountBusy && busy.startsWith('current:') ? '切换中…' : '设为当前') : null,
+                        h('button', { type: 'button', className: 'codexButton danger', disabled: Boolean(busy), onClick: () => { void removeAccount(account.accountId) } }, accountBusy && busy.startsWith('remove:') ? '移除中…' : '移除'),
+                      ),
+                    )
+                  })),
                 )
               : null,
             loading
@@ -848,11 +908,11 @@ window.__ModuleLoader__.load({
               : null,
             h('div', { className: 'codexActions' },
               h('button', { type: 'button', className: 'codexButton primary', disabled: Boolean(busy) || pending || loading, onClick: () => { void startDevice() } },
-                busy === 'device' ? '正在申请设备码…' : connected ? '用设备码重新登录' : '使用设备码登录'),
+                busy === 'device' ? '正在申请设备码…' : connected ? '用设备码添加账号' : '使用设备码登录'),
               h('button', {
                 type: 'button', className: 'codexButton', disabled: Boolean(busy) || pending || loading || !browserAvailable,
                 title: browserAvailable ? '展开 callback 检测，不会自动弹出窗口' : '仅支持 HTTP 127.0.0.1/localhost 入口', onClick: () => { void startBrowser() },
-              }, busy === 'browser' ? '正在准备浏览器登录…' : connected ? '用浏览器重新登录' : '本机浏览器 OAuth'),
+              }, busy === 'browser' ? '正在准备浏览器登录…' : connected ? '用浏览器添加账号' : '本机浏览器 OAuth'),
               pending && !devicePending && !browserPending ? h('button', { type: 'button', className: 'codexButton danger', disabled: Boolean(busy), onClick: () => { void cancel() } }, busy === 'cancel' ? '取消中…' : '取消登录') : null,
               connected ? h('button', { type: 'button', className: 'codexButton', disabled: Boolean(busy), onClick: refresh }, busy === 'refresh' ? '刷新中…' : '刷新用量') : null,
               connected || (status && status.credentialError) ? h('button', { type: 'button', className: 'codexButton danger', disabled: Boolean(busy), onClick: () => { void logout() } }, busy === 'logout' ? '退出中…' : '退出登录') : null,

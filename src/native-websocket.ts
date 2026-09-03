@@ -631,10 +631,12 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
       captureTurnState: (state) => {
         if (entry.turnState === undefined) entry.turnState = state
       },
+      ...(pinnedAccountId === undefined ? {} : { pinnedAccountId }),
     })
     let reconnects = 0
     let connectionRetryDelayMs = INITIAL_CONNECTION_RETRY_DELAY_MS
     let recovered = false
+    let pinnedAccountId = mode.pinnedAccountId
     let requestCompleted = false
     try {
       if (entry.disabled) {
@@ -649,6 +651,10 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
         try {
           const credential = await this.options.resolveCredential(signal)
           attemptedCredential = credential
+          if (pinnedAccountId === undefined) pinnedAccountId = credential.accountId
+          else if (credential.accountId !== pinnedAccountId) {
+            throw failure('native Codex account changed during request', 'AUTH')
+          }
           this.assertFastAuthority(credential, mode)
           for await (const chunk of this.attempt(entry, prepared, credential, signal)) {
             emitted = true

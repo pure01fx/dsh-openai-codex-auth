@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Multi-account authentication
+
+- Adds multiple managed ChatGPT OAuth accounts with a global current-account selector, per-account removal, optional email labels, and automatic activation of newly added accounts.
+- Migrates legacy version-1 single-account credential documents atomically to version 2 while keeping DSH credential publication and rollback guarantees.
+- Pins every request/recovery attempt to its starting account so a concurrent account switch cannot replay an authenticated request under another account.
+- Extends the same-origin settings API and Web UI with an account list, explicit switching, and individual logout controls without exposing access or refresh tokens.
+
 ## 0.7.3
 
 ### Client model visibility

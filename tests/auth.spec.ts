@@ -131,8 +131,11 @@ function accessToken(accountId = 'acct_test', expiresAt?: number): string {
   })
 }
 
-function idToken(accountId = 'acct_test'): string {
-  return jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: accountId } })
+function idToken(accountId = 'acct_test', email?: string): string {
+  return jwt({
+    'https://api.openai.com/auth': { chatgpt_account_id: accountId },
+    ...email === undefined ? {} : { email },
+  })
 }
 
 async function writeCredential(home: string, credential: OpenAICodexCredential): Promise<void> {
@@ -140,7 +143,13 @@ async function writeCredential(home: string, credential: OpenAICodexCredential):
 }
 
 async function readCredential(home: string): Promise<OpenAICodexCredential> {
-  return JSON.parse(await readFile(join(home, 'openai-codex-auth.json'), 'utf8')).credential
+  const raw = JSON.parse(await readFile(join(home, 'openai-codex-auth.json'), 'utf8'))
+  if (raw.version === 1) return raw.credential
+  return raw.accounts.find((account: OpenAICodexCredential) => account.accountId === raw.currentAccountId)
+}
+
+async function readCredentialDocument(home: string): Promise<any> {
+  return JSON.parse(await readFile(join(home, 'openai-codex-auth.json'), 'utf8'))
 }
 
 async function createHarness(): Promise<{
@@ -280,12 +289,13 @@ describe('OAuth token parsing', () => {
       access_token: accessToken('acct_access'),
       refresh_token: 'refresh-1',
       expires_in: 3600,
-      id_token: idToken('acct_id'),
+      id_token: idToken('acct_id', 'person@example.com'),
     })
     expect(credential).toMatchObject({
       access: accessToken('acct_access'),
       refresh: 'refresh-1',
       accountId: 'acct_id',
+      email: 'person@example.com',
     })
   })
 
@@ -332,9 +342,11 @@ describe('OpenAICodexAuth routes', () => {
     harness = undefined
   })
 
-  it('registers seven same-origin routes, exposes browser availability, and disposes all routes', async () => {
+  it('registers nine same-origin routes, exposes browser availability, and disposes all routes', async () => {
     harness = await createHarness()
     expect([...harness.web.routes.keys()].sort()).toEqual([
+      '/openai-codex/accounts/current',
+      '/openai-codex/accounts/logout',
       '/openai-codex/browser/complete',
       '/openai-codex/browser/prepare',
       '/openai-codex/browser/start',
@@ -364,7 +376,106 @@ describe('OpenAICodexAuth routes', () => {
     harness = undefined
   })
 
-  it('serializes concurrent JSON refreshes and persists rotated tokens and identity', async () => {
+  it('migrates a legacy credential and manages multiple accounts without exposing secrets', async () => {
+    harness = await createHarness()
+    const accountA: OpenAICodexCredential = {
+      access: accessToken('acct_a'), refresh: 'refresh-a', expires: Date.now() + 3_600_000,
+      accountId: 'acct_a', email: 'a@example.com',
+    }
+    const accountB: OpenAICodexCredential = {
+      access: accessToken('acct_b'), refresh: 'refresh-b', expires: Date.now() + 3_600_000,
+      accountId: 'acct_b', email: 'b@example.com',
+    }
+    await writeCredential(harness.home, accountA)
+    harness.credentials.value = accountA.access
+
+    await expect(harness.root.openaiCodexAuth.bearerToken()).resolves.toBe(accountA.access)
+    expect(await readCredentialDocument(harness.home)).toEqual({
+      version: 2, currentAccountId: 'acct_a', accounts: [accountA],
+    })
+
+    await (harness.root.openaiCodexAuth as any)
+      .finishCredential(accountB, new AbortController().signal)
+    expect(await readCredentialDocument(harness.home)).toEqual({
+      version: 2, currentAccountId: 'acct_b', accounts: [accountA, accountB],
+    })
+    expect(harness.credentials.value).toBe(accountB.access)
+
+    const status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
+      host: '127.0.0.1:3080',
+    }))
+    const snapshot = JSON.parse(status.body)
+    expect(snapshot).toMatchObject({
+      loggedIn: true,
+      accountId: 'acct_b',
+      email: 'b@example.com',
+      currentAccountId: 'acct_b',
+      accounts: [
+        { accountId: 'acct_a', email: 'a@example.com', current: false },
+        { accountId: 'acct_b', email: 'b@example.com', current: true },
+      ],
+    })
+    expect(status.body).not.toContain('refresh-a')
+    expect(status.body).not.toContain(accountA.access)
+
+    const headers = { host: '127.0.0.1:3080', 'x-dsh-csrf': snapshot.csrf as string }
+    const switched = await call(harness.web, '/openai-codex/accounts/current', jsonRequest(
+      'POST', '/openai-codex/accounts/current', headers, { accountId: 'acct_a' },
+    ))
+    expect(switched.statusCode).toBe(200)
+    expect(harness.credentials.value).toBe(accountA.access)
+    expect((await readCredentialDocument(harness.home)).currentAccountId).toBe('acct_a')
+
+    harness.credentials.writable = false
+    const blockedSwitch = await call(harness.web, '/openai-codex/accounts/current', jsonRequest(
+      'POST', '/openai-codex/accounts/current', headers, { accountId: 'acct_b' },
+    ))
+    expect(blockedSwitch.statusCode).toBe(409)
+    expect(harness.credentials.value).toBe(accountA.access)
+    expect((await readCredentialDocument(harness.home)).currentAccountId).toBe('acct_a')
+    harness.credentials.writable = true
+
+    const rejectedWithoutCsrf = await call(harness.web, '/openai-codex/accounts/logout', jsonRequest(
+      'POST', '/openai-codex/accounts/logout', { host: '127.0.0.1:3080' }, { accountId: 'acct_b' },
+    ))
+    expect(rejectedWithoutCsrf.statusCode).toBe(403)
+
+    const removedNonCurrent = await call(harness.web, '/openai-codex/accounts/logout', jsonRequest(
+      'POST', '/openai-codex/accounts/logout', headers, { accountId: 'acct_b' },
+    ))
+    expect(removedNonCurrent.statusCode).toBe(200)
+    expect(harness.credentials.value).toBe(accountA.access)
+    expect((await readCredentialDocument(harness.home)).accounts).toEqual([accountA])
+
+    const missing = await call(harness.web, '/openai-codex/accounts/current', jsonRequest(
+      'POST', '/openai-codex/accounts/current', headers, { accountId: 'acct_missing' },
+    ))
+    expect(missing.statusCode).toBe(404)
+
+    const removedLast = await call(harness.web, '/openai-codex/accounts/logout', jsonRequest(
+      'POST', '/openai-codex/accounts/logout', headers, { accountId: 'acct_a' },
+    ))
+    expect(removedLast.statusCode).toBe(200)
+    expect(harness.credentials.value).toBeUndefined()
+    expect(await readCredentialDocument(harness.home)).toEqual({
+      version: 2, currentAccountId: null, accounts: [],
+    })
+  })
+
+  it('rejects ambiguous version-two account documents', () => {
+    const credential = {
+      access: accessToken('acct_a'), refresh: 'refresh-a', expires: Date.now() + 3_600_000,
+      accountId: 'acct_a',
+    }
+    expect(() => internals.parseCredentialDocument(JSON.stringify({
+      version: 2, currentAccountId: 'acct_missing', accounts: [credential],
+    }), 'test.json')).toThrow('invalid credential document')
+    expect(() => internals.parseCredentialDocument(JSON.stringify({
+      version: 2, currentAccountId: 'acct_a', accounts: [credential, credential],
+    }), 'test.json')).toThrow('invalid credential document')
+  })
+
+  it('serializes concurrent JSON refreshes and preserves stable account identity', async () => {
     harness = await createHarness()
     const old: OpenAICodexCredential = {
       access: accessToken('acct_old'),
@@ -374,12 +485,12 @@ describe('OpenAICodexAuth routes', () => {
     }
     await writeCredential(harness.home, old)
     harness.credentials.value = old.access
-    const nextAccess = accessToken('acct_access-new')
+    const nextAccess = jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_old' }, nonce: 'rotated' })
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       access_token: nextAccess,
       refresh_token: 'refresh-new',
       expires_in: 3600,
-      id_token: idToken('acct_new'),
+      id_token: idToken('acct_old'),
     }), { status: 200, headers: { 'content-type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -400,9 +511,30 @@ describe('OpenAICodexAuth routes', () => {
     expect(await readCredential(harness.home)).toMatchObject({
       access: nextAccess,
       refresh: 'refresh-new',
-      accountId: 'acct_new',
+      accountId: 'acct_old',
     })
     expect(harness.credentials.value).toBe(nextAccess)
+  })
+
+  it('rejects a refreshed token that changes the stored account identity', async () => {
+    harness = await createHarness()
+    const old: OpenAICodexCredential = {
+      access: accessToken('acct_old'), refresh: 'refresh-old', expires: Date.now() - 1,
+      accountId: 'acct_old',
+    }
+    await writeCredential(harness.home, old)
+    harness.credentials.value = old.access
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({
+      access_token: accessToken('acct_other'),
+      refresh_token: 'refresh-other',
+      expires_in: 3600,
+      id_token: idToken('acct_other'),
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))))
+
+    await expect(harness.root.openaiCodexAuth.bearerToken())
+      .rejects.toThrow('changed the ChatGPT account identity')
+    expect(await readCredential(harness.home)).toEqual(old)
+    expect(harness.credentials.value).toBe(old.access)
   })
 
   it('preserves disk and published credentials on a terminal refresh error', async () => {
@@ -639,12 +771,12 @@ describe('OpenAICodexAuth routes', () => {
     }
     await writeCredential(harness.home, old)
     harness.credentials.value = old.access
-    const nextAccess = accessToken('acct_new')
+    const nextAccess = jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_old' }, nonce: 'refreshed' })
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       access_token: nextAccess,
       refresh_token: 'refresh-new',
       expires_in: 3600,
-      id_token: idToken('acct_new'),
+      id_token: idToken('acct_old'),
     }), { status: 200, headers: { 'content-type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -666,14 +798,14 @@ describe('OpenAICodexAuth routes', () => {
     expect(await readCredential(harness.home)).toMatchObject({
       access: nextAccess,
       refresh: 'refresh-new',
-      accountId: 'acct_new',
+      accountId: 'acct_old',
     })
     expect(harness.credentials.value).toBe(nextAccess)
   })
 
   it('reconciles an already-rotated managed authority without another refresh', async () => {
     harness = await createHarness()
-    const previous = accessToken('acct_previous')
+    const previous = jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_current' }, nonce: 'previous' })
     const current: OpenAICodexCredential = {
       access: accessToken('acct_current'),
       refresh: 'refresh-current',
@@ -687,7 +819,7 @@ describe('OpenAICodexAuth routes', () => {
 
     await expect((harness.root.openaiCodexAuth as any).recoverNativeCredential({
       accessToken: previous,
-      accountId: 'acct_previous',
+      accountId: 'acct_current',
     })).resolves.toBe(true)
 
     expect(fetchMock).not.toHaveBeenCalled()
@@ -697,8 +829,8 @@ describe('OpenAICodexAuth routes', () => {
 
   it('detects external rotation per operation without importing external authority', async () => {
     harness = await createHarness()
-    const previous = accessToken('acct_external_old')
-    const current = accessToken('acct_external_new')
+    const previous = jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_external' }, nonce: 'previous' })
+    const current = accessToken('acct_external')
     harness.credentials.value = current
     harness.credentials.source = 'env'
     harness.credentials.writable = false
@@ -708,11 +840,11 @@ describe('OpenAICodexAuth routes', () => {
 
     await expect(service.recoverNativeCredential({
       accessToken: previous,
-      accountId: 'acct_external_old',
+      accountId: 'acct_external',
     })).resolves.toBe(true)
     await expect(service.recoverNativeCredential({
       accessToken: current,
-      accountId: 'acct_external_new',
+      accountId: 'acct_external',
     })).resolves.toBe(false)
 
     expect(setSpy).not.toHaveBeenCalled()
@@ -1025,7 +1157,7 @@ describe('OpenAICodexAuth routes', () => {
     })
   })
 
-  it('falls back to account-B WHAM after account-A response quota precedes HTTP auth recovery', async () => {
+  it('never recovers an account-A request under the current account B', async () => {
     harness = await createHarness()
     const accountA = {
       access: accessToken('acct_a'), refresh: 'refresh-a',
@@ -1035,69 +1167,45 @@ describe('OpenAICodexAuth routes', () => {
       access: accessToken('acct_b'), refresh: 'refresh-b',
       expires: Date.now() + 3_600_000, accountId: 'acct_b',
     }
-    await writeCredential(harness.home, accountA)
-    harness.credentials.value = accountA.access
-    const service = harness.root.openaiCodexAuth as any
-    service.setCredentialAccount('acct_a')
-
-    const wham = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      rate_limit: { primary_window: { used_percent: 31 } },
-    }), { status: 200, headers: { 'content-type': 'application/json' } }))
-    vi.stubGlobal('fetch', wham)
-    const transportFetch = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'expired' }), {
-        status: 401,
-        headers: {
-          'content-type': 'application/json',
-          'x-codex-primary-used-percent': '100',
-          'x-codex-primary-window-minutes': '15',
-        },
-      }))
-      .mockResolvedValueOnce(new Response(SUCCESS_SSE, {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-      }))
-    let authority = { accessToken: accountA.access, accountId: accountA.accountId }
-    const transport = new NativeCodexHttpTransport({
-      resolveCredential: async () => authority,
-      recoverCredential: async () => {
-        await writeCredential(harness.home, accountB)
-        harness.credentials.value = accountB.access
-        authority = { accessToken: accountB.access, accountId: accountB.accountId }
-        service.setCredentialAccount(accountB.accountId)
-        return true
-      },
-      fetch: transportFetch as typeof fetch,
-      onRateLimits: (observation) => {
-        service.acceptRateLimits(observation.accountId, observation.updates)
-      },
-    })
-
-    const agent = { id: 'session-account-recovery', session: { id: 'session-account-recovery' } }
-    const session = { id: 'session-account-recovery' }
-    await (harness.root as any).waterfall(agent, 'agent/request', {
-      agent, turn: 1, step: 1, signal: new AbortController().signal,
-    }, () => Promise.resolve({ provider: 'openai-codex', model: 'gpt-5.6-sol' }))
-    for await (const _chunk of transport.stream({
-      provider: 'openai-codex', model: 'gpt-5.6-sol', messages: [],
-    })) { /* consume */ }
-    ;(harness.root as any).emit(session, 'session/event', session, {
-      type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } }, seq: 1, time: Date.now(),
-    })
-
-    await vi.waitFor(() => { expect(wham).toHaveBeenCalledTimes(1) })
-    expect(wham.mock.calls[0]?.[1]).toMatchObject({
-      headers: {
-        authorization: `Bearer ${accountB.access}`,
-        'chatgpt-account-id': 'acct_b',
-      },
-    })
-    const status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
-      host: '127.0.0.1:3080',
+    await writeFile(join(harness.home, 'openai-codex-auth.json'), JSON.stringify({
+      version: 2, currentAccountId: 'acct_b', accounts: [accountA, accountB],
     }))
-    expect(JSON.parse(status.body)).toMatchObject({
-      accountId: 'acct_b',
-      usage: { primary: { usedPercent: 31 }, source: 'endpoint' },
+    harness.credentials.value = accountB.access
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect((harness.root.openaiCodexAuth as any).recoverNativeCredential({
+      accessToken: accountA.access,
+      accountId: accountA.accountId,
+    })).resolves.toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(harness.credentials.value).toBe(accountB.access)
+    expect((await readCredentialDocument(harness.home)).currentAccountId).toBe('acct_b')
+  })
+
+  it('keeps an in-flight usage request on its starting credential snapshot', async () => {
+    harness = await createHarness()
+    const accountA = {
+      access: accessToken('acct_a'), refresh: 'refresh-a',
+      expires: Date.now() + 3_600_000, accountId: 'acct_a',
+    }
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      await gate
+      return new Response(JSON.stringify({ rate_limit: { primary_window: { used_percent: 31 } } }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const pending = (harness.root.openaiCodexAuth as any).fetchUsage(accountA)
+    release()
+    await expect(pending).resolves.toMatchObject({ primary: { usedPercent: 31 } })
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: {
+        authorization: `Bearer ${accountA.access}`,
+        'chatgpt-account-id': 'acct_a',
+      },
     })
   })
 
@@ -1223,9 +1331,9 @@ describe('OpenAICodexAuth routes', () => {
     await writeCredential(harness.home, oldCredential)
     harness.credentials.value = oldCredential.access
     const service = harness.root.openaiCodexAuth as any
-    vi.spyOn(service, 'write').mockImplementationOnce(async () => {
+    vi.spyOn(harness.credentials, 'set').mockImplementationOnce(async () => {
       harness!.credentials.value = independentAccess
-      throw new Error('simulated auth-file write failure')
+      throw new Error('simulated credential publication failure')
     })
 
     await expect(service.finishCredential(nextCredential, new AbortController().signal))
@@ -1395,8 +1503,10 @@ describe('OpenAICodexAuth routes', () => {
     }))
     expect(start.statusCode).toBe(200)
     await vi.waitFor(() => expect(harness!.credentials.value).toBe(token))
-    const document = JSON.parse(await readFile(join(harness.home, 'openai-codex-auth.json'), 'utf8'))
-    expect(document.credential).toMatchObject({ refresh: 'refresh-token', accountId: 'acct_test' })
+    const document = await readCredentialDocument(harness.home)
+    expect(document).toMatchObject({ version: 2, currentAccountId: 'acct_test' })
+    expect(document.accounts).toHaveLength(1)
+    expect(document.accounts[0]).toMatchObject({ refresh: 'refresh-token', accountId: 'acct_test' })
     const status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {
       host: '127.0.0.1:3080',
     }))

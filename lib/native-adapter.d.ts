@@ -24,6 +24,8 @@ export interface NativeCodexTransportMode {
     turnState?: string;
     /** @internal Receives a newly observed bounded turn-state token. */
     captureTurnState?: (state: string) => void;
+    /** @internal Pins WebSocket reconnects and HTTP fallback to one account. */
+    pinnedAccountId?: string;
 }
 export interface NativeCodexTransport {
     stream(options: GenerateOptions, mode?: NativeCodexTransportMode): AsyncIterable<StreamChunk>;

@@ -97,6 +97,42 @@ describe('Codex settings login gestures', () => {
   })
 })
 
+describe('Codex multi-account source contract', () => {
+  it('reads the account collection and identifies the current account', () => {
+    expect(source).toContain('Array.isArray(status.accounts) ? status.accounts : []')
+    expect(source).toContain('const currentAccountId = status && status.currentAccountId')
+    expect(source).toContain('account.current === true || account.accountId === currentAccountId')
+    expect(source).toContain("h('strong', null, '已添加账号')")
+    expect(source).toContain("' · 当前账号'")
+  })
+
+  it('prefers optional email while retaining accountId as secondary identity', () => {
+    expect(source).toContain('currentAccount && currentAccount.email ? currentAccount.email : shortAccount(status && status.accountId)')
+    expect(source).toContain("h('span', { title: account.accountId }")
+    expect(source).toContain("h('strong', null, account.email || shortAccount(account.accountId))")
+    expect(source).toContain("account.email ? h('span', null, ' · ' + shortAccount(account.accountId)) : null")
+  })
+
+  it('switches and removes a selected account through the CSRF post helper', () => {
+    const mutations = between('const mutateAccount = async (path, accountId, action) => {', 'const logout = async () => {')
+    expect(mutations).toContain('if (busy) return')
+    expect(mutations).toContain('await post(path, { accountId })')
+    expect(mutations).toContain('await load(false)')
+    expect(mutations).toContain("mutateAccount('/accounts/current', accountId, 'current')")
+    expect(mutations).toContain("mutateAccount('/accounts/logout', accountId, 'remove')")
+    expect(mutations).toContain("window.confirm('确定移除 '")
+    expect(mutations).toContain("移除后将退出 Codex")
+    expect(source).toContain("'设为当前'")
+    expect(source).toContain("'移除'")
+  })
+
+  it('keeps both login methods available as add-account actions', () => {
+    expect(source).toContain("connected ? '用设备码添加账号' : '使用设备码登录'")
+    expect(source).toContain("connected ? '用浏览器添加账号' : '本机浏览器 OAuth'")
+    expect(source).toContain("await post('/logout')")
+  })
+})
+
 describe('Codex model visibility bridge', () => {
   it('caches loaded Codex models and filters hidden rows from the shared directory', async () => {
     const storage = new Map<string, string>([
