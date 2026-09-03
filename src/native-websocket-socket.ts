@@ -1,6 +1,8 @@
 /** Bounded Node WebSocket client seam with injectable deterministic factories. */
 import { LlmError, ProviderRequestId } from '@deepseek-ai/dsh-llm'
 import type { IncomingHttpHeaders } from 'node:http'
+import { HttpsProxyAgent } from 'https-proxy-agent'
+import { getProxyForUrl } from 'proxy-from-env'
 import { nativeCodexEndpoint } from './endpoint.js'
 import {
   NATIVE_CODEX_CONNECTION_FAILED_CODE,
@@ -66,6 +68,13 @@ function positive(value: number | undefined, fallback: number, label: string): n
   if (value === undefined) return fallback
   if (!Number.isSafeInteger(value) || value <= 0) throw failure(`native Codex ${label} is invalid`, 'INVALID_ARGS')
   return value
+}
+
+/** Resolve the same opt-in environment proxy contract used by Node fetch. */
+export function nativeCodexWebSocketProxy(endpoint: string): string | undefined {
+  if (process.env.NODE_USE_ENV_PROXY !== '1') return undefined
+  const proxy = getProxyForUrl(nativeCodexEndpoint(endpoint, true).toString())
+  return proxy.length === 0 ? undefined : proxy
 }
 
 export function nativeCodexWebSocketUrl(endpoint: string): string {
@@ -195,8 +204,11 @@ export class NodeNativeCodexWebSocketFactory implements NativeCodexWebSocketFact
     if (options.signal?.aborted) throw abortFailure(options.signal)
     return new Promise((resolve, reject) => {
       const responseHeaders: Record<string, string> = {}
+      const proxy = nativeCodexWebSocketProxy(options.url)
+      const agent = proxy === undefined ? undefined : new HttpsProxyAgent(proxy)
       const socket = new WebSocket(nativeCodexWebSocketUrl(options.url), {
         headers: options.headers,
+        ...(agent === undefined ? {} : { agent }),
         handshakeTimeout: timeout,
         maxPayload: maximum,
         perMessageDeflate: true,

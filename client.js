@@ -49,6 +49,121 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function writeAvailableModels(models) {
+      try {
+        const next = JSON.stringify(models)
+        if (window.localStorage.getItem(AVAILABLE_MODELS_KEY) === next) return
+        window.localStorage.setItem(AVAILABLE_MODELS_KEY, next)
+        window.dispatchEvent(new CustomEvent(MODEL_CATALOG_EVENT, { detail: models }))
+      } catch {
+        // Browser-local catalog persistence is advisory and must never break model loading.
+      }
+    }
+
+    function codexModels(groups) {
+      const models = []
+      const seen = new Set()
+      for (const group of Array.isArray(groups) ? groups : []) {
+        if (!group || (group.id !== 'openai-codex' && group.id !== 'openai-codex-native')) continue
+        for (const model of Array.isArray(group.models) ? group.models : []) {
+          if (!model || typeof model.id !== 'string' || model.id.length === 0
+            || typeof model.name !== 'string' || model.name.length === 0 || seen.has(model.id)) continue
+          seen.add(model.id)
+          models.push({ id: model.id, name: model.name })
+          if (models.length >= 512) return models
+        }
+      }
+      return models
+    }
+
+    function visibleModelGroups(groups) {
+      if (!Array.isArray(groups)) return []
+      const hidden = new Set(readModelVisibility().hidden)
+      if (hidden.size === 0) return groups
+      return groups.flatMap((group) => {
+        if (!group || (group.id !== 'openai-codex' && group.id !== 'openai-codex-native')) return [group]
+        const models = Array.isArray(group.models)
+          ? group.models.filter((model) => model && !hidden.has(model.id)) : []
+        return [{ ...group, models }]
+      })
+    }
+
+    function installModelVisibilityBridge(ctx) {
+      const resolver = ctx.modelDirectories
+      if (!resolver || typeof resolver.directoryFor !== 'function') return () => {}
+      const originalDirectoryFor = resolver.directoryFor
+      const tracked = new Map()
+
+      const render = (directory, rawGroups) => {
+        const available = codexModels(rawGroups)
+        if (available.length > 0) writeAvailableModels(available)
+        const groups = visibleModelGroups(rawGroups)
+        if (directory.store && typeof directory.store.update === 'function') {
+          directory.store.update((state) => { state.groups = groups })
+        }
+        return groups
+      }
+
+      const track = (directory) => {
+        if (!directory || tracked.has(directory)
+          || typeof directory.load !== 'function' || typeof directory.dispose !== 'function') return directory
+        const record = {
+          load: directory.load,
+          dispose: directory.dispose,
+          wrappedLoad: undefined,
+          wrappedDispose: undefined,
+          generation: 0,
+          rawGroups: directory.store && typeof directory.store.getSnapshot === 'function'
+            ? directory.store.getSnapshot().groups : [],
+        }
+        record.wrappedLoad = async function (...args) {
+          const generation = ++record.generation
+          const value = await record.load.apply(this, args)
+          const rawGroups = Array.isArray(value && value.groups) ? value.groups : []
+          if (generation !== record.generation) {
+            const groups = visibleModelGroups(rawGroups)
+            return value && typeof value === 'object' ? { ...value, groups } : value
+          }
+          record.rawGroups = rawGroups
+          const groups = render(directory, record.rawGroups)
+          return value && typeof value === 'object' ? { ...value, groups } : value
+        }
+        record.wrappedDispose = function (...args) {
+          ++record.generation
+          tracked.delete(directory)
+          return record.dispose.apply(this, args)
+        }
+        directory.load = record.wrappedLoad
+        directory.dispose = record.wrappedDispose
+        tracked.set(directory, record)
+        if (record.rawGroups.length > 0) render(directory, record.rawGroups)
+        return directory
+      }
+
+      const bridgedDirectoryFor = function (...args) {
+        return track(originalDirectoryFor.apply(this, args))
+      }
+      resolver.directoryFor = bridgedDirectoryFor
+      if (resolver.live && resolver.live.directories && typeof resolver.live.directories.values === 'function') {
+        for (const directory of resolver.live.directories.values()) track(directory)
+      }
+      const refresh = () => {
+        for (const [directory, record] of tracked) render(directory, record.rawGroups)
+      }
+      window.addEventListener(MODEL_VISIBILITY_EVENT, refresh)
+
+      return () => {
+        window.removeEventListener(MODEL_VISIBILITY_EVENT, refresh)
+        if (resolver.directoryFor === bridgedDirectoryFor) resolver.directoryFor = originalDirectoryFor
+        for (const [directory, record] of tracked) {
+          ++record.generation
+          if (directory.load === record.wrappedLoad) directory.load = record.load
+          if (directory.dispose === record.wrappedDispose) directory.dispose = record.dispose
+        }
+        tracked.clear()
+      }
+    }
+
     const css = `
       .codexSection{box-sizing:border-box;max-width:720px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:12px}
       .codexSection *{box-sizing:border-box}.codexTitle{color:var(--dsw-alias-label-primary);margin:0;font-size:16px;font-weight:500;line-height:24px}
@@ -748,8 +863,11 @@ window.__ModuleLoader__.load({
       )
     }
 
-    const inject = ['slots']
+    const inject = ['slots', 'modelDirectories']
     function apply(ctx) {
+      ctx.inject(['modelDirectories'], (scope) => {
+        scope.effect(() => installModelVisibilityBridge(scope), 'openai-codex-auth: model visibility bridge')
+      })
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',
         id: 'openai-codex',

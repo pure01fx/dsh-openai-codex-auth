@@ -22,6 +22,8 @@ export interface NativeCodexWebSocketConnectOptions {
 export interface NativeCodexWebSocketFactory {
     connect(options: NativeCodexWebSocketConnectOptions): Promise<NativeCodexWebSocket>;
 }
+/** Resolve the same opt-in environment proxy contract used by Node fetch. */
+export declare function nativeCodexWebSocketProxy(endpoint: string): string | undefined;
 export declare function nativeCodexWebSocketUrl(endpoint: string): string;
 export declare class NodeNativeCodexWebSocketFactory implements NativeCodexWebSocketFactory {
     connect(options: NativeCodexWebSocketConnectOptions): Promise<NativeCodexWebSocket>;

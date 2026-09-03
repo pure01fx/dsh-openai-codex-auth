@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import {
   LlmError,
   createAssistantMessage,
@@ -15,6 +17,7 @@ import {
 import { NativeCodexWebSocketTransport } from '../src/native-websocket.ts'
 import {
   NodeNativeCodexWebSocketFactory,
+  nativeCodexWebSocketProxy,
   nativeCodexWebSocketUrl,
   type NativeCodexWebSocket,
   type NativeCodexWebSocketConnectOptions,
@@ -27,7 +30,10 @@ const HTTP_SUCCESS = await readFile(
 )
 const CREDENTIAL = { accessToken: 'synthetic-token', accountId: 'synthetic-account' }
 
-afterEach(() => { vi.restoreAllMocks() })
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllEnvs()
+})
 
 function completed(id: string, usage = { input_tokens: 1, output_tokens: 1 }): string {
   return JSON.stringify({ type: 'response.completed', response: { id, usage } })
@@ -386,37 +392,30 @@ describe('NativeCodexWebSocketTransport', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('waits through a half-minute network outage without consuming reconnects', async () => {
+  it('bounds credential-backed WebSocket connection outages before HTTP fallback', async () => {
     const delays: number[] = []
-    const warn = vi.fn()
-    const recovered = socket([
-      completed('resp_warm_network'),
-      ...textResponse('resp_network', 'msg_network', 'back'),
-    ])
     const factory = new ScriptedFactory([
-      new LlmError('offline one', NATIVE_CODEX_CONNECTION_FAILED_CODE),
-      new LlmError('offline two', NATIVE_CODEX_CONNECTION_FAILED_CODE),
-      new LlmError('offline three', NATIVE_CODEX_CONNECTION_FAILED_CODE),
-      new LlmError('offline four', NATIVE_CODEX_CONNECTION_FAILED_CODE),
-      new LlmError('offline five', NATIVE_CODEX_CONNECTION_FAILED_CODE),
-      new LlmError('offline six', NATIVE_CODEX_CONNECTION_FAILED_CODE),
-      recovered,
+      new LlmError('offline prewarm', NATIVE_CODEX_CONNECTION_FAILED_CODE),
+      new LlmError('still offline', NATIVE_CODEX_CONNECTION_FAILED_CODE),
     ])
+    const fetchMock = vi.fn(async () => response())
     const transport = new NativeCodexWebSocketTransport({
       resolveCredential: async () => CREDENTIAL,
       webSocketFactory: factory,
+      fetch: fetchMock as typeof fetch,
       maxWebSocketReconnects: 0,
+      initialRetryDelayMs: 200,
+      random: () => 0.5,
       sleep: async delay => { delays.push(delay) },
-      warn,
     })
 
     await expect(collect(transport.stream(firstRequest()))).resolves.toEqual(
       expect.arrayContaining([expect.objectContaining({ type: 'finish' })]),
     )
 
-    expect(factory.options).toHaveLength(7)
-    expect(delays).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000])
-    expect(warn).toHaveBeenCalledTimes(6)
+    expect(factory.options).toHaveLength(2)
+    expect(delays).toEqual([200])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('cancels promptly while waiting for WebSocket network recovery', async () => {
@@ -999,6 +998,64 @@ describe('NativeCodexWebSocketTransport', () => {
       headers: {},
       signal: controller.signal,
     })).rejects.toMatchObject({ code: 'DISPOSED' })
+  })
+
+
+
+  it('uses opt-in HTTP proxy environment variables and respects NO_PROXY', () => {
+    vi.stubEnv('NODE_USE_ENV_PROXY', '')
+    vi.stubEnv('HTTPS_PROXY', 'http://127.0.0.1:7890')
+    vi.stubEnv('https_proxy', '')
+    vi.stubEnv('NO_PROXY', '')
+    vi.stubEnv('no_proxy', '')
+    expect(nativeCodexWebSocketProxy('https://chatgpt.com/backend-api/codex/responses'))
+      .toBeUndefined()
+
+    vi.stubEnv('NODE_USE_ENV_PROXY', '1')
+    expect(nativeCodexWebSocketProxy('https://chatgpt.com/backend-api/codex/responses'))
+      .toBe('http://127.0.0.1:7890')
+
+    vi.stubEnv('NO_PROXY', 'chatgpt.com')
+    expect(nativeCodexWebSocketProxy('https://chatgpt.com/backend-api/codex/responses'))
+      .toBeUndefined()
+
+    vi.stubEnv('NO_PROXY', '')
+    vi.stubEnv('HTTP_PROXY', 'http://127.0.0.1:7891')
+    vi.stubEnv('http_proxy', '')
+    expect(nativeCodexWebSocketProxy('http://127.0.0.2:8080/responses'))
+      .toBe('http://127.0.0.1:7891')
+  })
+
+  it('tunnels the WebSocket handshake through the selected HTTP proxy', async () => {
+    const destinations: string[] = []
+    const proxy = createServer()
+    proxy.on('connect', (request, socket) => {
+      destinations.push(request.url ?? '')
+      socket.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')
+    })
+    await new Promise<void>((resolve, reject) => {
+      proxy.once('error', reject)
+      proxy.listen(0, '127.0.0.1', resolve)
+    })
+    try {
+      const address = proxy.address() as AddressInfo
+      vi.stubEnv('NODE_USE_ENV_PROXY', '1')
+      vi.stubEnv('HTTPS_PROXY', `http://127.0.0.1:${String(address.port)}`)
+      vi.stubEnv('https_proxy', '')
+      vi.stubEnv('NO_PROXY', '')
+      vi.stubEnv('no_proxy', '')
+
+      await expect(new NodeNativeCodexWebSocketFactory().connect({
+        url: 'https://chatgpt.com/backend-api/codex/responses',
+        headers: {},
+        connectTimeoutMs: 1_000,
+      })).rejects.toMatchObject({ code: 'WS_RETRYABLE' })
+      expect(destinations).toEqual(['chatgpt.com:443'])
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        proxy.close(error => { if (error) reject(error); else resolve() })
+      })
+    }
   })
 
   it('validates endpoint conversion without inventing a subprotocol', () => {

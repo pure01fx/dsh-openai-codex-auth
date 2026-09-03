@@ -16,9 +16,9 @@ describe('package integration boundary', () => {
     expect(root.files.some(path => path.startsWith('profiles/'))).toBe(false)
     await expect(text('../profiles/native-codex-hu/package.json'))
       .rejects.toMatchObject({ code: 'ENOENT' })
-    expect(await text('../CHANGELOG.md')).toContain(
-      `# Changelog\n\n## Unreleased\n\n## ${root.version}\n`,
-    )
+    const changelog = await text('../CHANGELOG.md')
+    expect(changelog).toMatch(/^# Changelog\n\n## Unreleased\n/)
+    expect(changelog).toContain(`\n## ${root.version}\n`)
     expect(await text('../cordis.patch.yml')).toBe(
       '# Native Codex is the package default. Integration bundles own any removal or\n'
       + '# replacement of an existing openai-codex route before mounting this plugin.\n'

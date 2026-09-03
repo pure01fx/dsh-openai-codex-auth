@@ -87,6 +87,7 @@ function reconnectable(code: string): boolean {
   return [
     'WS_RETRYABLE', 'WS_RETRYABLE_RESET', 'WS_PROTOCOL_ERROR',
     'WS_FRAME_TOO_LARGE', 'WS_RESPONSE_TOO_LARGE', 'TIMEOUT',
+    NATIVE_CODEX_CONNECTION_FAILED_CODE,
   ].includes(code)
 }
 
@@ -665,9 +666,12 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
             if (failedStepRetryable(failureValue.code)) throw failedStepRetry(failureValue)
             throw failureValue
           }
-          if (failureValue.code === NATIVE_CODEX_CONNECTION_FAILED_CODE
-            || (attemptedCredential === undefined
-              && isNativeCodexConnectionFailure(failureValue))) {
+          // Credential resolution may need the network itself, so wait until it recovers.
+          // Once a credential is available, however, a WebSocket-only outage must consume
+          // the bounded reconnect budget and then fall back to HTTP/SSE instead of leaving
+          // the DSH turn in an invisible infinite reconnect loop.
+          if (attemptedCredential === undefined
+            && isNativeCodexConnectionFailure(failureValue)) {
             await this.waitForConnection(connectionRetryDelayMs, signal)
             connectionRetryDelayMs = Math.min(
               connectionRetryDelayMs * 2, MAX_CONNECTION_RETRY_DELAY_MS,

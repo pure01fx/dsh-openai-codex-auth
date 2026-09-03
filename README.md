@@ -189,7 +189,7 @@ $DSH_HOME/openai-codex-auth.json
 
 上游 Native Codex Responses 请求没有输出 token 上限字段，因此普通会话若显式设置 `maxTokens` 仍会在 Provider I/O 前失败。DSH 的压缩与会话标题辅助调用会固定携带 `maxTokens`，并分别通过 `purpose: compaction` 与 `purpose: session-title` 标识；本适配器允许这两类 hint 通过，但不会把它序列化为 `max_output_tokens`，实际输出长度仍由 Native Codex 决定。
 
-原生 route 默认使用 Responses WebSocket v2，在会话首个请求上执行 `generate: false` prewarm，并仅在请求历史严格延伸时发送 `previous_response_id` 与增量后缀。连接重建会清除增量链；纯 WebSocket/HTTP 连接建立失败不消耗普通 stream retry 预算，而是按 Codex 的网络恢复策略从 5 秒指数退避到 60 秒并持续等待成功或取消，因此可跨越半分钟断网。连接已经建立后的首个 DSH chunk 前错误仍使用默认 5 次 stream retry 与 200ms 起步的有界指数退避，安全重试耗尽或握手返回 HTTP 426 后，该 DSH 会话会确定性地回退到 HTTP/SSE。transport 层在任何 DSH chunk 已输出后仍不会直接重放原始 stream；它会把瞬态中断重新分类为只允许 durable failed-step 恢复的错误，标准 Agent Profile 中的 `dsh-llm-retry` 再按默认 5 次策略重建请求。该外层策略不会再次匹配 transport 已在首个 chunk 前耗尽的有限 stream 错误，避免两层预算相乘；失败 attempt 的原始事件可以留作非 surface 诊断，但不会组装成模型可见的持久 assistant message。未加载该恢复插件的直接 `ctx.llm.stream()` 调用在首个 chunk 后仍保持 single-attempt，避免重复输出。WebSocket `codex.rate_limits` 事件、握手/错误 metadata 以及 HTTP/SSE response headers 中的 `x-codex-*` quota 会被边界校验后直接写入 Host 用量缓存；额外 metered limit 不会覆盖默认 `codex` 套餐卡片。`response.completed.usage_metadata.amount` 会按原始高精度字符串保留，并作为当前账号的最近响应观测出现在 status JSON 中。
+原生 route 默认使用 Responses WebSocket v2，在会话首个请求上执行 `generate: false` prewarm，并仅在请求历史严格延伸时发送 `previous_response_id` 与增量后缀。连接重建会清除增量链；凭据解析完成前的网络失败不消耗普通 stream retry 预算，而是按 Codex 的网络恢复策略从 5 秒指数退避到 60 秒并持续等待成功或取消。凭据可用后，WebSocket 连接建立失败与连接已经建立后的首个 DSH chunk 前错误都使用默认 5 次 stream retry 与 200ms 起步的有界指数退避；安全重试耗尽或握手返回 HTTP 426 后，该 DSH 会话会确定性地回退到 HTTP/SSE，因此仅 WebSocket 不可达不会让界面无限停在 Deep diving。transport 层在任何 DSH chunk 已输出后仍不会直接重放原始 stream；它会把瞬态中断重新分类为只允许 durable failed-step 恢复的错误，标准 Agent Profile 中的 `dsh-llm-retry` 再按默认 5 次策略重建请求。该外层策略不会再次匹配 transport 已在首个 chunk 前耗尽的有限 stream 错误，避免两层预算相乘；失败 attempt 的原始事件可以留作非 surface 诊断，但不会组装成模型可见的持久 assistant message。未加载该恢复插件的直接 `ctx.llm.stream()` 调用在首个 chunk 后仍保持 single-attempt，避免重复输出。WebSocket `codex.rate_limits` 事件、握手/错误 metadata 以及 HTTP/SSE response headers 中的 `x-codex-*` quota 会被边界校验后直接写入 Host 用量缓存；额外 metered limit 不会覆盖默认 `codex` 套餐卡片。`response.completed.usage_metadata.amount` 会按原始高精度字符串保留，并作为当前账号的最近响应观测出现在 status JSON 中。
 
 `<base>-fast` 只是公开选择别名：wire model 仍是 `<base>`，请求携带 `service_tier: priority`。若账号目录不声明 priority 能力，或请求前账号 authority 已改变，Fast 会直接失败，不会静默降级。Reasoning 选择在 adapter 边界按上游规则转换：`persistent` 在线上请求中写为 `disabled`；`ultra` 优先使用 Catalog 的 `multi_agent_reasoning_effort`，否则回退到 `max`、最高非 Ultra 档或 `medium`。
 
@@ -221,7 +221,7 @@ $DSH_HOME/openai-codex-auth.json
 
 ## 代理
 
-插件使用 Node.js 原生 `fetch`。若访问 OpenAI 需要 HTTP 代理，启动 DSH 前设置：
+插件的 HTTP/SSE 请求使用 Node.js 原生 `fetch`，WebSocket v2 使用 `ws`。设置 `NODE_USE_ENV_PROXY=1` 后，两条链路都会按 `HTTPS_PROXY` / `HTTP_PROXY` 选择 HTTP CONNECT 代理并遵守 `NO_PROXY`；若访问 OpenAI 需要代理，请在启动 DSH 前设置：
 
 ```sh
 NODE_USE_ENV_PROXY=1 \
@@ -230,7 +230,7 @@ HTTPS_PROXY=http://127.0.0.1:7890 \
 dsh web
 ```
 
-可按环境补充 `NO_PROXY=localhost,127.0.0.1,::1`。
+可按环境补充 `NO_PROXY=localhost,127.0.0.1,::1`。对于 `https://` / `wss://` Codex 端点应设置 `HTTPS_PROXY`；代理地址本身可以是 `http://`，WebSocket 会通过该代理向 `chatgpt.com:443` 建立 CONNECT 隧道。
 
 ## 常见问题
 

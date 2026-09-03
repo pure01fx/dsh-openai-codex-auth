@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { createContext, runInContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
@@ -59,6 +60,11 @@ describe('Codex settings login gestures', () => {
     expect(source).toContain("const HIDDEN_MODELS_KEY = 'dsh.openai-codex.hidden-models.v1'")
     expect(source).toContain("const AVAILABLE_MODELS_KEY = 'dsh.openai-codex.available-models.v1'")
     expect(source).toContain("window.dispatchEvent(new CustomEvent(MODEL_VISIBILITY_EVENT")
+    expect(source).toContain("const inject = ['slots', 'modelDirectories']")
+    expect(source).toContain('scope.effect(() => installModelVisibilityBridge(scope)')
+    expect(source).toContain('const rawGroups = Array.isArray(value && value.groups)')
+    expect(source).toContain('if (generation !== record.generation)')
+    expect(source).toContain("window.localStorage.setItem(AVAILABLE_MODELS_KEY, next)")
     expect(source).toContain("h('strong', null, '模型列表显示')")
     expect(source).toContain("className: 'codexModelVisibilityOption'")
     expect(source).toContain('checked: modelVisibility.hidden.includes(model.id)')
@@ -88,5 +94,131 @@ describe('Codex settings login gestures', () => {
     expect(quotaRing).toContain("strokeDasharray: remainingLength + ' ' + usedLength")
     expect(quotaRing).toContain('strokeDashoffset: -usedLength')
     expect(quotaRing).not.toContain('codexQuotaConsumed')
+  })
+})
+
+describe('Codex model visibility bridge', () => {
+  it('caches loaded Codex models and filters hidden rows from the shared directory', async () => {
+    const storage = new Map<string, string>([
+      ['dsh.openai-codex.hidden-models.v1', JSON.stringify(['gpt-hidden'])],
+    ])
+    const listeners = new Map<string, Set<(event: unknown) => void>>()
+    let plugin: { apply: (ctx: unknown) => void } | undefined
+    class TestEvent {
+      constructor(public readonly type: string, public readonly init?: unknown) {}
+    }
+    const browser = {
+      __ModuleLoader__: {
+        load(definition: { factory: (require: (name: string) => unknown) => typeof plugin }) {
+          plugin = definition.factory(() => ({
+            createElement: () => undefined,
+            useCallback: () => undefined,
+            useEffect: () => undefined,
+            useMemo: () => undefined,
+            useRef: () => undefined,
+            useState: () => undefined,
+          }))
+        },
+      },
+      localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => { storage.set(key, value) },
+      },
+      addEventListener(type: string, listener: (event: unknown) => void) {
+        const group = listeners.get(type) ?? new Set()
+        group.add(listener)
+        listeners.set(type, group)
+      },
+      removeEventListener(type: string, listener: (event: unknown) => void) {
+        listeners.get(type)?.delete(listener)
+      },
+      dispatchEvent(event: TestEvent) {
+        for (const listener of listeners.get(event.type) ?? []) listener(event)
+      },
+    }
+    runInContext(source, createContext({ window: browser, CustomEvent: TestEvent, console }))
+
+    const state = { groups: [] as unknown[] }
+    const raw = {
+      current: null,
+      routable: true,
+      failures: [],
+      groups: [
+        {
+          id: 'openai-codex',
+          name: 'Codex',
+          models: [
+            { id: 'gpt-visible', name: 'Visible' },
+            { id: 'gpt-hidden', name: 'Hidden' },
+          ],
+        },
+        { id: 'other', name: 'Other', models: [{ id: 'other-model', name: 'Other model' }] },
+      ],
+    }
+    let loadImplementation: () => Promise<typeof raw> = async () => raw
+    const directory = {
+      store: {
+        getSnapshot: () => state,
+        update: (update: (value: typeof state) => void) => { update(state) },
+      },
+      load: () => loadImplementation(),
+      dispose: () => {},
+    }
+    const resolver = {
+      live: { directories: new Map([['session', directory]]) },
+      directoryFor: () => directory,
+    }
+    const scope = {
+      modelDirectories: resolver,
+      effect: (setup: () => void) => setup(),
+    }
+    const ctx = {
+      modelDirectories: resolver,
+      inject: (_services: string[], setup: (scope: typeof scope) => void) => setup(scope),
+      slots: { inject: () => {} },
+    }
+    expect(plugin).toBeDefined()
+    plugin!.apply(ctx)
+
+    const loaded = await resolver.directoryFor().load()
+    expect(JSON.parse(JSON.stringify(loaded.groups))).toEqual([
+      { id: 'openai-codex', name: 'Codex', models: [{ id: 'gpt-visible', name: 'Visible' }] },
+      { id: 'other', name: 'Other', models: [{ id: 'other-model', name: 'Other model' }] },
+    ])
+    expect(JSON.parse(JSON.stringify(state.groups))).toEqual(loaded.groups)
+    expect(JSON.parse(storage.get('dsh.openai-codex.available-models.v1')!)).toEqual([
+      { id: 'gpt-visible', name: 'Visible' },
+      { id: 'gpt-hidden', name: 'Hidden' },
+    ])
+
+    storage.set('dsh.openai-codex.hidden-models.v1', '[]')
+    browser.dispatchEvent(new TestEvent('dsh:openai-codex-model-visibility'))
+    expect(JSON.parse(JSON.stringify(state.groups))).toEqual(raw.groups)
+
+    const oldRaw = {
+      ...raw,
+      groups: [{ id: 'openai-codex', name: 'Codex', models: [{ id: 'gpt-old', name: 'Old' }] }],
+    }
+    const newRaw = {
+      ...raw,
+      groups: [{ id: 'openai-codex', name: 'Codex', models: [{ id: 'gpt-new', name: 'New' }] }],
+    }
+    let resolveOld!: (value: typeof raw) => void
+    let resolveNew!: (value: typeof raw) => void
+    const oldResponse = new Promise<typeof raw>((resolve) => { resolveOld = resolve })
+    const newResponse = new Promise<typeof raw>((resolve) => { resolveNew = resolve })
+    let call = 0
+    loadImplementation = () => call++ === 0 ? oldResponse : newResponse
+    const oldLoad = resolver.directoryFor().load()
+    const newLoad = resolver.directoryFor().load()
+    resolveNew(newRaw)
+    await newLoad
+    resolveOld(oldRaw)
+    await oldLoad
+
+    expect(JSON.parse(JSON.stringify(state.groups))).toEqual(newRaw.groups)
+    expect(JSON.parse(storage.get('dsh.openai-codex.available-models.v1')!)).toEqual([
+      { id: 'gpt-new', name: 'New' },
+    ])
   })
 })

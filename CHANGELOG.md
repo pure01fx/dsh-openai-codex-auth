@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.7.3
+
+### Client model visibility
+
+- Connects the settings-panel Codex visibility controls to DSH's shared model directory: opening either model selector now caches the loaded Codex catalog, updates an already-open settings section, and filters hidden models in the current browser.
+
+### WebSocket reliability
+
+- Keeps credential-backed WebSocket connection failures inside the bounded reconnect budget and falls back to HTTP/SSE, preventing turns from remaining on “Deep diving...” forever when a server can reach Codex over HTTPS but not WebSocket.
+- Routes WebSocket v2 through the same opt-in `NODE_USE_ENV_PROXY=1`, `HTTPS_PROXY` / `HTTP_PROXY`, and `NO_PROXY` contract as Node fetch, using an HTTP CONNECT tunnel for WSS endpoints.
+
 ## 0.7.2
 
 ### Auxiliary-call compatibility
