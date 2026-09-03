@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.0
+
 ### Multi-account authentication
 
 - Adds multiple managed ChatGPT OAuth accounts with a global current-account selector, per-account removal, optional email labels, and automatic activation of newly added accounts.

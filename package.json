@@ -1,6 +1,6 @@
 {
   "name": "@pure01fx/dsh-openai-codex-auth",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "description": "Native ChatGPT Codex provider, device-code-first login, and same-origin Web integration for DeepSeek Harness",
   "license": "MIT",
   "publishConfig": {
