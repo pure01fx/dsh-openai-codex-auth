@@ -18,6 +18,11 @@ export declare function nativeCodexWireReasoningEffort(effort: string | undefine
 /** Request-scoped native Codex transport owned by this package. */
 export interface NativeCodexTransportMode {
     serviceTier?: typeof CODEX_FAST_SERVICE_TIER;
+    /** Enables the model-specific Responses Lite request and routing contract. */
+    responsesLite?: {
+        defaultVerbosity?: string;
+        instructionsTemplate?: string;
+    };
     publicModel?: string;
     authorityHash?: string;
     /** Turn-scoped sticky routing state captured from a provider response. */

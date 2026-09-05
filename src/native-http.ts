@@ -591,6 +591,8 @@ export class NativeCodexHttpTransport {
             'x-codex-routing-hint': routingHint,
             ...(activeTurnState === undefined ? {} : { 'x-codex-turn-state': activeTurnState }),
             ...(generation.purpose === 'compaction' ? { 'x-openai-subagent': 'compact' } : {}),
+            ...(mode.responsesLite === undefined
+              ? {} : { 'x-openai-internal-codex-responses-lite': 'true' }),
             accept: 'text/event-stream',
             'content-type': 'application/json',
             ...attributionHeaders(),

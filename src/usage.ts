@@ -14,6 +14,7 @@ export interface UsageWindow {
 export interface UsageLimitSummary {
   id: string
   name?: string
+  normalModelSlug?: string
   primary?: UsageWindow
   secondary?: UsageWindow
   limitReached?: boolean
@@ -68,9 +69,11 @@ function usageLimit(
   const row = value as Record<string, unknown>
   const primary = usageWindow(row.primary_window ?? row.primary)
   const secondary = usageWindow(row.secondary_window ?? row.secondary)
-  const limitReached = typeof row.limit_reached === 'boolean'
+  const explicitLimitReached = typeof row.limit_reached === 'boolean'
     ? row.limit_reached
     : typeof row.limitReached === 'boolean' ? row.limitReached : undefined
+  const allowed = typeof row.allowed === 'boolean' ? row.allowed : undefined
+  const limitReached = explicitLimitReached ?? (allowed === undefined ? undefined : !allowed)
   if (primary === undefined && secondary === undefined && limitReached === undefined) return undefined
   return {
     id,
@@ -107,7 +110,13 @@ export function normalizeUsage(value: unknown): UsageSummary {
         boundedUsageText(row.limit_name ?? row.limitName),
         row.rate_limit ?? row.rateLimit,
       )
-      if (extra !== undefined) limits.push(extra)
+      if (extra !== undefined) {
+        const normalModelSlug = boundedUsageText(row.normal_model_slug ?? row.normalModelSlug)
+        limits.push({
+          ...extra,
+          ...normalModelSlug === undefined ? {} : { normalModelSlug },
+        })
+      }
     }
   }
   const sortedLimits = sortedUsageLimits(limits)

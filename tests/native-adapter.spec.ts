@@ -254,6 +254,87 @@ describe('NativeCodexAdapter catalog boundary', () => {
     dispose()
   })
 
+  it('exposes and routes Astra through Responses Lite, including its Fast alias', async () => {
+    const standard: NativeCodexModel = {
+      slug: 'gpt-standard', displayName: 'GPT Standard',
+      supportedReasoningLevels: [], visibility: 'list', supportedInApi: true, priority: 1,
+      additionalSpeedTiers: [], serviceTiers: [], inputModalities: ['text'],
+    }
+    const lite: NativeCodexModel = {
+      ...standard, slug: 'gpt-6-astra', displayName: 'GPT-6 Astra', priority: 0,
+      defaultReasoningLevel: 'high',
+      supportedReasoningLevels: [{ effort: 'high', description: 'High' }],
+      additionalSpeedTiers: ['fast'],
+      serviceTiers: [{ id: 'priority', name: 'Fast', description: 'Faster' }],
+      useResponsesLite: true, defaultVerbosity: 'low',
+      instructionsTemplate: 'Astra catalog instructions',
+    }
+    const seen: Array<{ options: GenerateOptions; mode: unknown }> = []
+    const adapter = new NativeCodexAdapter(
+      {
+        list: async () => [lite, standard],
+        listWithAuthority: async () => ({ models: [lite, standard], authorityHash: 'authority' }),
+        etag: () => undefined,
+      },
+      { async *stream(options, mode) {
+        seen.push({ options, mode })
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      } },
+    )
+
+    await expect(adapter.listModels(NATIVE_CODEX_PROVIDER)).resolves.toEqual([
+      {
+        provider: NATIVE_CODEX_PROVIDER, id: lite.slug, name: lite.displayName,
+        inputModalities: ['text'],
+      },
+      {
+        provider: NATIVE_CODEX_PROVIDER, id: 'gpt-6-astra-fast', name: 'GPT-6 Astra (Fast)',
+        inputModalities: ['text'],
+      },
+      {
+        provider: NATIVE_CODEX_PROVIDER, id: standard.slug, name: standard.displayName,
+        inputModalities: ['text'],
+      },
+    ])
+    await expect(adapter.resolveModel(NATIVE_CODEX_PROVIDER, lite.slug)).resolves.toMatchObject({
+      id: lite.slug, reasoning: { defaultEffort: 'high' },
+    })
+    await collect(adapter.stream({ ...request(), model: lite.slug }))
+    await collect(adapter.stream({ ...request(), model: 'gpt-6-astra-fast' }))
+    expect(seen).toEqual([
+      {
+        options: expect.objectContaining({
+          model: lite.slug, reasoningEffort: 'high',
+        }),
+        mode: { responsesLite: {
+          defaultVerbosity: 'low', instructionsTemplate: 'Astra catalog instructions',
+        } },
+      },
+      {
+        options: expect.objectContaining({
+          model: lite.slug, reasoningEffort: 'high',
+        }),
+        mode: {
+          serviceTier: 'priority', publicModel: 'gpt-6-astra-fast', authorityHash: 'authority',
+          responsesLite: {
+            defaultVerbosity: 'low', instructionsTemplate: 'Astra catalog instructions',
+          },
+        },
+      },
+    ])
+
+    let fallbackMode: unknown
+    const fallbackAdapter = new NativeCodexAdapter(
+      { list: async () => [], etag: () => undefined },
+      { async *stream(_options, mode) {
+        fallbackMode = mode
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      } },
+    )
+    await collect(fallbackAdapter.stream({ ...request(), model: 'gpt-6-astra' }))
+    expect(fallbackMode).toEqual({ responsesLite: { defaultVerbosity: 'low' } })
+  })
+
   it('maps Ultra and Persistent selections to official Responses wire efforts', async () => {
     const model: NativeCodexModel = {
       slug: 'reasoning-model',

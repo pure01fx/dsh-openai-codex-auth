@@ -137,7 +137,7 @@ describe('native Codex continuation replay', () => {
     const sse = [
       'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_empty","summary":[],"encrypted_content":"opaque_empty"}}',
       '',
-      'data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_empty","call_id":"call_empty","name":"lookup","arguments":"{}"}}',
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_empty","call_id":"call_empty","name":"lookup","namespace":"functions","arguments":"{}"}}',
       '',
       'data: {"type":"response.completed","response":{}}',
       '',
@@ -148,7 +148,7 @@ describe('native Codex continuation replay', () => {
     })))
     expect(state.items).toEqual([
       { type: 'reasoning', id: 'rs_empty', blocks: [], encryptedContent: 'opaque_empty' },
-      { type: 'function_call', id: 'fc_empty', block: 0 },
+      { type: 'function_call', id: 'fc_empty', namespace: 'functions', block: 0 },
     ])
     expect(replayAssistantInput([
       { type: 'tool-call', id: CallId('call_empty'), name: 'lookup', arguments: '{}' },
@@ -157,7 +157,7 @@ describe('native Codex continuation replay', () => {
     })).toEqual([
       { type: 'reasoning', id: 'rs_empty', summary: [], encrypted_content: 'opaque_empty' },
       {
-        type: 'function_call', id: 'fc_empty',
+        type: 'function_call', id: 'fc_empty', namespace: 'functions',
         call_id: 'call_empty', name: 'lookup', arguments: '{}',
       },
     ])

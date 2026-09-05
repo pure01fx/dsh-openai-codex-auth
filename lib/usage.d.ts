@@ -8,6 +8,7 @@ export interface UsageWindow {
 export interface UsageLimitSummary {
     id: string;
     name?: string;
+    normalModelSlug?: string;
     primary?: UsageWindow;
     secondary?: UsageWindow;
     limitReached?: boolean;

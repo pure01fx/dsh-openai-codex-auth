@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.9.0
+
+### Codex 0.153 compatibility
+
+- Tracks Codex main snapshot `ddf04ad` and uses the stable `0.153.4` model-catalog client version after auditing the intervening Responses, WebSocket, OAuth, Catalog, and quota protocol changes.
+- Preserves the complete bounded `response.completed.response.usage` object alongside the exact high-precision `usage_metadata.amount` value across HTTP/SSE, WebSocket, and same-origin status responses.
+- Supports GPT-6-Astra and its Fast alias through the complete Responses Lite contract: stable developer instruction/tool prefix items, namespaced functions, all-turn reasoning context, model-default verbosity, disabled parallel tool calls, the HTTP Lite header, and the WebSocket request-metadata route marker. Standard Responses requests remain unchanged.
+- Recognizes `normal_model_slug` on additional `wham/usage` limits and honors the backend's `allowed` decision when `limit_reached` is absent, while intentionally remaining a passive client without the Luna Reserve opt-in header.
+- Shows an isolated quota snapshot, including remaining reset credits, for every managed account, refreshing once when Codex settings opens or on explicit request; concurrent usage lookups are time-bounded outside the main credential lock, rotating refresh operations are journaled, bounded independently of caller cancellation, single-flighted per account across service processes, recoverable after persistence contention, and never ambiguously retried, stale non-current credentials are renewed without changing the selected account, and one account's failure does not hide the others.
+
 ## 0.8.0
 
 ### Multi-account authentication

@@ -26,14 +26,20 @@ export interface ResponsesRequestInput {
     input: Record<string, unknown>[];
 }
 export declare function toResponsesTools(tools: readonly ToolSchema[]): Record<string, unknown>[];
+/** Responses Lite loads ordinary DSH functions through one canonical namespace. */
+export declare function toResponsesLiteTools(tools: readonly ToolSchema[]): Record<string, unknown>[];
 /** Convert resolved DSH messages into Responses instructions and ordered input items. */
 export declare function toResponsesInput(messages: readonly ResolvedMessage[], system?: string): ResponsesRequestInput;
 /** Bound call ids while preserving every function call/result correlation. */
 export declare function normalizeCodexCallIds(input: readonly Record<string, unknown>[]): Record<string, unknown>[];
 export interface ResponsesRequestMode {
     serviceTier?: 'priority';
+    responsesLite?: {
+        defaultVerbosity?: string;
+        instructionsTemplate?: string;
+    };
 }
-/** Build the canonical Standard/Fast HTTP Responses body. */
+/** Build the canonical Standard/Fast or model-specific Responses Lite body. */
 export declare function codexRequestBody(options: GenerateOptions, messages: readonly ResolvedMessage[], mode?: ResponsesRequestMode): Record<string, unknown>;
 export interface ResponsesUsage {
     input_tokens: number;
@@ -55,6 +61,7 @@ interface ResponsesOutputItem {
     id?: string;
     call_id?: string;
     name?: string;
+    namespace?: string;
     arguments?: string;
     encrypted_content?: string;
     summary?: unknown[];

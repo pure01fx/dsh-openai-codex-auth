@@ -31,6 +31,11 @@ export interface NativeCodexModel {
     additionalSpeedTiers: readonly string[];
     serviceTiers: readonly NativeCodexServiceTier[];
     defaultServiceTier?: string;
+    /** Requires the model-specific Responses Lite wire contract, not Standard Responses. */
+    useResponsesLite?: boolean;
+    /** Catalog-provided defaults needed to construct the model-specific request. */
+    defaultVerbosity?: string;
+    instructionsTemplate?: string;
     contextWindow?: number;
     inputModalities: readonly string[];
 }

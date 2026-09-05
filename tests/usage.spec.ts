@@ -70,11 +70,12 @@ describe('normalizeUsage', () => {
   it('keeps additional metered limits and native credits distinct from reset credits', () => {
     expect(normalizeUsage({
       plan_type: 'pro',
-      rate_limit: { primary_window: { used_percent: 10 } },
+      rate_limit: { allowed: false, primary_window: { used_percent: 10 } },
       additional_rate_limits: [{
         metered_feature: 'codex-other',
-        limit_name: 'gpt-5.6-sol',
-        rate_limit: { primary_window: { used_percent: 70, limit_window_seconds: 900 } },
+        limit_name: 'gpt-5.6-sol-fast',
+        normal_model_slug: 'gpt-5.6-sol',
+        rate_limit: { allowed: true, primary_window: { used_percent: 70, limit_window_seconds: 900 } },
       }],
       credits: { has_credits: true, unlimited: false, balance: '9.99' },
       rate_limit_reset_credits: { available_count: 3 },
@@ -82,11 +83,13 @@ describe('normalizeUsage', () => {
       credits: { hasCredits: true, unlimited: false, balance: '9.99' },
       resetCredits: 3,
       limits: [
-        { id: 'codex', primary: { usedPercent: 10 } },
+        { id: 'codex', primary: { usedPercent: 10 }, limitReached: true },
         {
           id: 'codex_other',
-          name: 'gpt-5.6-sol',
+          name: 'gpt-5.6-sol-fast',
+          normalModelSlug: 'gpt-5.6-sol',
           primary: { usedPercent: 70, windowSeconds: 900 },
+          limitReached: false,
         },
       ],
     })

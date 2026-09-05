@@ -178,17 +178,22 @@ function turnKey(generation: GenerateOptions): string {
     .update(`${generation.purpose ?? 'ordinary'}:handbuilt`).digest('base64url')
 }
 
-function withTurnState(
-  request: Record<string, unknown>, turnState: string | undefined,
+function withRequestMetadata(
+  request: Record<string, unknown>, turnState: string | undefined, responsesLite: boolean,
 ): Record<string, unknown> {
-  if (turnState === undefined) return request
+  if (turnState === undefined && !responsesLite) return request
   const metadata = typeof request.client_metadata === 'object'
       && request.client_metadata !== null && !Array.isArray(request.client_metadata)
     ? request.client_metadata as Record<string, unknown>
     : {}
   return {
     ...request,
-    client_metadata: { ...metadata, 'x-codex-turn-state': turnState },
+    client_metadata: {
+      ...metadata,
+      ...(turnState === undefined ? {} : { 'x-codex-turn-state': turnState }),
+      ...(responsesLite
+        ? { ws_request_header_x_openai_internal_codex_responses_lite: 'true' } : {}),
+    },
   }
 }
 
@@ -213,6 +218,7 @@ function normalizedOutputItem(event: ResponsesStreamEvent): Record<string, unkno
   if (item.type === 'function_call') {
     return {
       type: 'function_call', ...(id === undefined ? {} : { id }),
+      ...(typeof item.namespace === 'string' ? { namespace: item.namespace } : {}),
       call_id: item.call_id, name: item.name, arguments: item.arguments,
     }
   }
@@ -576,7 +582,9 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
     let justPrewarmed = false
     if (!entry.prewarmAttempted) {
       entry.prewarmAttempted = true
-      const warm = entry.protocol.prewarm(withTurnState(prepared.request, entry.turnState))
+      const warm = entry.protocol.prewarm(withRequestMetadata(
+        prepared.request, entry.turnState, prepared.mode.responsesLite !== undefined,
+      ))
       for await (const _chunk of this.exchange(
         entry, warm.payload, prepared.generation, prepared.mode, credential.accountId, true, signal,
       )) { /* prewarm is invisible */ }
@@ -584,7 +592,9 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
       justPrewarmed = true
     }
     const plan = entry.protocol.plan(
-      withTurnState(prepared.request, entry.turnState), justPrewarmed,
+      withRequestMetadata(
+        prepared.request, entry.turnState, prepared.mode.responsesLite !== undefined,
+      ), justPrewarmed,
     )
     yield* this.exchange(
       entry, plan.payload, prepared.generation, prepared.mode, credential.accountId, false, signal,

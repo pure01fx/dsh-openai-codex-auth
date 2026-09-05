@@ -54,6 +54,10 @@ const TOKEN_REF = credentialRef('DSH_OPENAI_CODEX_TOKEN')
 const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 const MAX_ERROR_BODY_LENGTH = 1_024
 const MAX_REQUEST_BODY_LENGTH = 8_192
+const ACCOUNT_USAGE_REQUEST_TIMEOUT_MS = 10_000
+const TOKEN_REFRESH_REQUEST_TIMEOUT_MS = 30_000
+const ACCOUNT_REFRESH_LOCK_WAIT_MS = 35_000
+const CREDENTIAL_REFRESH_PERSIST_WAIT_MS = 500
 
 /** Persisted OAuth credential for one ChatGPT account. */
 export interface OpenAICodexCredential {
@@ -73,9 +77,25 @@ export interface OpenAICodexCredentialDocument {
 
 interface LegacyCredentialDocument { version: 1; credential: OpenAICodexCredential }
 
+type CredentialRefreshJournal = {
+  version: 1
+  accountId: string
+  startedAt: number
+  stored: OpenAICodexCredential
+} & (
+  | { phase: 'pending' | 'uncertain' }
+  | { phase: 'refreshed'; refreshed: OpenAICodexCredential }
+)
+
 interface ParsedCredentialDocument {
   document: OpenAICodexCredentialDocument
   migrated: boolean
+}
+
+interface AccountUsageResult {
+  accountId: string
+  usage?: UsageSummary
+  error?: string
 }
 
 /** Plugin configuration. */
@@ -172,12 +192,31 @@ class DeviceCodeUnavailableError extends Error {
 class LoginConflictError extends Error {}
 class CredentialNotWritableError extends Error {}
 class AccountNotFoundError extends Error {}
+class CredentialRefreshUncertainError extends Error {
+  constructor(cause?: unknown) {
+    super('OpenAI credential refresh outcome is uncertain; sign in to this account again', { cause })
+  }
+}
 
 const PERMANENT_REFRESH_CODES = new Set([
   'refresh_token_expired',
   'refresh_token_reused',
   'refresh_token_invalidated',
   'invalid_grant',
+])
+
+const DEFINITIVE_OAUTH_REFRESH_CODES = new Set([
+  ...PERMANENT_REFRESH_CODES,
+  'access_denied',
+  'invalid_client',
+  'invalid_request',
+  'invalid_scope',
+  'server_error',
+  'slow_down',
+  'temporarily_unavailable',
+  'temporary_failure',
+  'unauthorized_client',
+  'unsupported_grant_type',
 ])
 
 class OAuthEndpointError extends Error {
@@ -200,6 +239,38 @@ function base64Url(value: Buffer): string {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isTimeoutAbort(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+    && signal.reason instanceof DOMException
+    && signal.reason.name === 'TimeoutError'
+}
+
+function boundedAccountUsageSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(ACCOUNT_USAGE_REQUEST_TIMEOUT_MS)
+  return signal === undefined ? timeout : AbortSignal.any([signal, timeout])
+}
+
+function isFileLockTimeout(error: unknown): boolean {
+  return error instanceof Error
+    && error.message.startsWith('atomic-write: timed out waiting for the writer lock at ')
+}
+
+function waitForSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return promise
+  if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Request cancelled'))
+  return new Promise<T>((resolveWait, rejectWait) => {
+    const onAbort = (): void => {
+      signal.removeEventListener('abort', onAbort)
+      rejectWait(signal.reason instanceof Error ? signal.reason : new Error('Request cancelled'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolveWait(value) },
+      (error: unknown) => { signal.removeEventListener('abort', onAbort); rejectWait(error) },
+    )
+  })
 }
 
 function throwIfCancelled(signal?: AbortSignal): void {
@@ -271,6 +342,13 @@ function isPermanentRefreshError(error: unknown): boolean {
   return error instanceof OAuthEndpointError
     && (error.status === 401
       || (error.oauthCode !== undefined && PERMANENT_REFRESH_CODES.has(error.oauthCode.toLowerCase())))
+}
+
+function isDefinitiveOAuthRefreshError(error: unknown): error is OAuthEndpointError {
+  return error instanceof OAuthEndpointError
+    && (error.status === 400 || error.status === 401)
+    && error.oauthCode !== undefined
+    && DEFINITIVE_OAUTH_REFRESH_CODES.has(error.oauthCode.toLowerCase())
 }
 
 function validateCredential(value: unknown, filename: string): OpenAICodexCredential {
@@ -385,7 +463,7 @@ async function tokenRequest(
       method: 'POST', redirect: 'error', ...init, ...signal === undefined ? {} : { signal },
     })
   } catch (error) {
-    if (signal?.aborted) throw new Error('OpenAI login cancelled')
+    if (signal?.aborted) throw new Error(isTimeoutAbort(signal) ? 'OpenAI token request timed out' : 'OpenAI login cancelled')
     throw error
   }
   if (!response.ok) {
@@ -785,7 +863,11 @@ export class OpenAICodexAuth extends Service {
   private readonly csrf = base64Url(randomBytes(24))
   private usageCache: UsageSummary | undefined
   private usageAccountId: string | undefined
-  private responseUsage: { accountId: string; amount: string; observedAt: number } | undefined
+  private responseUsage: {
+    accountId: string
+    metadata: CodexResponseUsageObservation['metadata']
+    observedAt: number
+  } | undefined
   private credentialAccountId: string | undefined
   private usageError: string | undefined
   private usageRefresh: {
@@ -794,6 +876,8 @@ export class OpenAICodexAuth extends Service {
     generation: number | undefined
   } | undefined
   private usageGeneration = 0
+  private accountUsageRequestGeneration = 0
+  private readonly accountUsageCredentialRefreshes = new Map<string, Promise<OpenAICodexCredential>>()
   private directUsageSequence = 0
   private directUsageAccountId: string | undefined
   private usageHasDirectDefault = false
@@ -900,6 +984,7 @@ export class OpenAICodexAuth extends Service {
         register('/openai-codex/browser/complete', (req, res) => this.handleBrowserComplete(req, res))
         register('/openai-codex/cancel', (req, res) => this.handleCancel(req, res))
         register('/openai-codex/accounts/current', (req, res) => this.handleSetCurrentAccount(req, res))
+        register('/openai-codex/accounts/usage', (req, res) => this.handleAccountUsage(req, res))
         register('/openai-codex/accounts/logout', (req, res) => this.handleAccountLogout(req, res))
         register('/openai-codex/logout', (req, res) => this.handleLogout(req, res))
       } catch (error) {
@@ -941,7 +1026,7 @@ export class OpenAICodexAuth extends Service {
       && observation.accountId !== this.credentialAccountId) return
     this.responseUsage = {
       accountId: observation.accountId,
-      amount: observation.metadata.amount,
+      metadata: observation.metadata,
       observedAt: Date.now(),
     }
   }
@@ -962,7 +1047,7 @@ export class OpenAICodexAuth extends Service {
     if (!hasData) return
     const sameUsageAccount = this.usageAccountId === accountId
     if (!sameUsageAccount) this.usageHasDirectDefault = false
-    if (hasDefaultQuota) this.usageGeneration += 1
+    this.usageGeneration += 1
     this.usageCache = mergeDirectUsage(
       sameUsageAccount ? this.usageCache : undefined,
       accepted,
@@ -1002,7 +1087,7 @@ export class OpenAICodexAuth extends Service {
 
   private async performUsageRefresh(generation: number): Promise<void> {
     try {
-      const credential = await withFileLock(this.filename, () => this.resolveManagedCredentialLocked())
+      const credential = await this.managedCredential()
       if (credential === undefined) {
         if (this.usageGeneration === generation) {
           this.usageCache = undefined
@@ -1163,54 +1248,61 @@ export class OpenAICodexAuth extends Service {
     await this.commitDocument(this.upsertCurrentCredential(document, credential))
   }
 
-  private async resolveManagedCredentialLocked(
-    signal?: AbortSignal,
-  ): Promise<OpenAICodexCredential | undefined> {
-    throwIfCancelled(signal)
-    const parsed = await readCredentialDocument(this.filename)
-    const document = parsed?.document
-    const current = currentCredential(document)
-    throwIfCancelled(signal)
-    if (current === undefined) {
-      this.setCredentialAccount(undefined)
-      return undefined
-    }
-    if (current.expires > Date.now() + TOKEN_REFRESH_PREEMPT_MS) {
-      if (parsed?.migrated) await this.commitDocument(document!, signal)
-      else await this.publishCredentialToken(current.access, signal)
-      this.setCredentialAccount(current.accountId)
-      return current
-    }
-    await this.assertCredentialWritable()
-    let next: OpenAICodexCredential
-    try {
-      next = await refreshToken(current, signal)
-    } catch (error) {
-      throwIfCancelled(signal)
-      if (!isPermanentRefreshError(error) && current.expires > Date.now()) {
-        if (parsed?.migrated) await this.commitDocument(document!, signal)
-        else await this.publishCredentialToken(current.access, signal)
-        this.setCredentialAccount(current.accountId)
-        return current
-      }
-      throw error
-    }
-    throwIfCancelled(signal)
-    if (next.accountId !== current.accountId) {
-      throw new Error('OpenAI refresh changed the ChatGPT account identity')
-    }
-    await this.commitDocument(this.upsertCurrentCredential(document!, next, current.accountId), signal)
-    this.setCredentialAccount(next.accountId)
-    return next
-  }
-
   /** Return the current managed bearer token, refreshing and migrating it when needed. */
   async bearerToken(signal?: AbortSignal): Promise<string | undefined> {
     throwIfCancelled(signal)
-    return withFileLock(this.filename, async () => {
-      const credential = await this.resolveManagedCredentialLocked(signal)
-      return credential?.access
-    })
+    while (true) {
+      const prepared = await withFileLock(this.filename, async () => {
+        throwIfCancelled(signal)
+        const parsed = await readCredentialDocument(this.filename)
+        const document = parsed?.document
+        const current = currentCredential(document)
+        if (current === undefined) {
+          this.setCredentialAccount(undefined)
+          return undefined
+        }
+        if (current.expires > Date.now() + TOKEN_REFRESH_PREEMPT_MS) {
+          if (parsed?.migrated) await this.commitDocument(document!, signal)
+          else await this.publishCredentialToken(current.access, signal)
+          this.setCredentialAccount(current.accountId)
+          return { credential: current, ready: true }
+        }
+        return { credential: current, ready: false }
+      })
+      if (prepared === undefined) return undefined
+      if (prepared.ready) return prepared.credential.access
+      let refreshed: OpenAICodexCredential | undefined
+      try {
+        refreshed = await waitForSignal(this.refreshManagedAccount(prepared.credential, true), signal)
+      } catch (error) {
+        throwIfCancelled(signal)
+        throw error
+      }
+      if (refreshed === undefined) continue
+      const access = await withFileLock(this.filename, async () => {
+        throwIfCancelled(signal)
+        const parsed = await readCredentialDocument(this.filename)
+        const document = parsed?.document
+        const current = currentCredential(document)
+        if (current === undefined || current.accountId !== prepared.credential.accountId) return undefined
+        if (current.expires <= Date.now()) throw new Error('OpenAI Codex access token has expired')
+        if (parsed?.migrated) await this.commitDocument(document!, signal)
+        else await this.publishCredentialToken(current.access, signal)
+        this.setCredentialAccount(current.accountId)
+        return current.access
+      })
+      if (access !== undefined) return access
+    }
+  }
+
+  private async managedCredential(signal?: AbortSignal): Promise<OpenAICodexCredential | undefined> {
+    while (true) {
+      const access = await this.bearerToken(signal)
+      if (access === undefined) return undefined
+      const current = currentCredential((await readCredentialDocument(this.filename))?.document)
+      if (current?.access === access) return current
+      throwIfCancelled(signal)
+    }
   }
 
   private externalNativeCredential(accessToken: string): NativeCodexCredential {
@@ -1238,23 +1330,20 @@ export class OpenAICodexAuth extends Service {
   private async resolveNativeCredential(signal?: AbortSignal): Promise<NativeCodexCredential> {
     try {
       throwIfCancelled(signal)
-      return await withFileLock(this.filename, async () => {
+      const managed = await this.managedCredential(signal)
+      if (managed !== undefined) {
         throwIfCancelled(signal)
-        const managed = await this.resolveManagedCredentialLocked(signal)
-        if (managed !== undefined) {
-          throwIfCancelled(signal)
-          return { accessToken: managed.access, accountId: managed.accountId }
-        }
-        const external = await this.ctx.credentials.resolve(TOKEN_REF)
-        throwIfCancelled(signal)
-        if (external === undefined) {
-          throw new LlmError('native Codex credential is not configured', 'MISSING_CREDENTIAL')
-        }
-        const credential = this.externalNativeCredential(external.value)
-        throwIfCancelled(signal)
-        this.setCredentialAccount(credential.accountId)
-        return credential
-      })
+        return { accessToken: managed.access, accountId: managed.accountId }
+      }
+      const external = await this.ctx.credentials.resolve(TOKEN_REF)
+      throwIfCancelled(signal)
+      if (external === undefined) {
+        throw new LlmError('native Codex credential is not configured', 'MISSING_CREDENTIAL')
+      }
+      const credential = this.externalNativeCredential(external.value)
+      throwIfCancelled(signal)
+      this.setCredentialAccount(credential.accountId)
+      return credential
     } catch (error) {
       if (error instanceof LlmError) throw error
       if (signal?.aborted) {
@@ -1269,9 +1358,12 @@ export class OpenAICodexAuth extends Service {
   }
 
   private nativeRecoveryError(error: unknown): LlmError {
+    const cause = error instanceof CredentialRefreshUncertainError && error.cause !== undefined
+      ? error.cause
+      : error
     const options: ConstructorParameters<typeof LlmError>[2] = {
-      cause: error,
-      ...(error instanceof OAuthEndpointError ? { status: error.status } : {}),
+      cause,
+      ...(cause instanceof OAuthEndpointError ? { status: cause.status } : {}),
     }
     if (error instanceof CredentialNotWritableError || isPermanentRefreshError(error)) {
       return new LlmError(
@@ -1293,41 +1385,46 @@ export class OpenAICodexAuth extends Service {
   ): Promise<boolean> {
     try {
       throwIfCancelled(signal)
-      return await withFileLock(this.filename, async () => {
+      const prepared = await withFileLock(this.filename, async (): Promise<{
+        result?: boolean
+        credential?: OpenAICodexCredential
+      }> => {
         throwIfCancelled(signal)
-        const parsed = await readCredentialDocument(this.filename)
-        const document = parsed?.document
-        const current = currentCredential(document)
-        throwIfCancelled(signal)
+        const current = currentCredential((await readCredentialDocument(this.filename))?.document)
         if (current === undefined) {
           const external = await this.ctx.credentials.resolve(TOKEN_REF)
           throwIfCancelled(signal)
-          if (external === undefined) return false
+          if (external === undefined) return { result: false }
           const credential = this.externalNativeCredential(external.value)
           throwIfCancelled(signal)
-          if (credential.accountId !== previous.accountId) return false
+          if (credential.accountId !== previous.accountId) return { result: false }
           this.setCredentialAccount(credential.accountId)
-          return credential.accessToken !== previous.accessToken
+          return { result: credential.accessToken !== previous.accessToken }
         }
         // A request that started under A must never recover by replaying under B.
-        if (current.accountId !== previous.accountId) return false
+        if (current.accountId !== previous.accountId) return { result: false }
         if (current.access !== previous.accessToken) {
           await this.publishCredentialToken(current.access, signal)
           throwIfCancelled(signal)
           this.setCredentialAccount(current.accountId)
-          return true
+          return { result: true }
         }
-        await this.assertCredentialWritable()
+        return { credential: current }
+      })
+      if (prepared.result !== undefined) return prepared.result
+      const refreshed = await waitForSignal(
+        this.refreshManagedAccount(prepared.credential!, true, true),
+        signal,
+      )
+      if (refreshed === undefined) return false
+      return withFileLock(this.filename, async () => {
         throwIfCancelled(signal)
-        const next = await refreshToken(current, signal)
+        const current = currentCredential((await readCredentialDocument(this.filename))?.document)
+        if (current === undefined || current.accountId !== previous.accountId) return false
+        await this.publishCredentialToken(current.access, signal)
         throwIfCancelled(signal)
-        if (next.accountId !== previous.accountId) {
-          throw new Error('OpenAI refresh changed the ChatGPT account identity')
-        }
-        await this.commitDocument(this.upsertCurrentCredential(document!, next, current.accountId), signal)
-        throwIfCancelled(signal)
-        this.setCredentialAccount(next.accountId)
-        return next.access !== previous.accessToken
+        this.setCredentialAccount(current.accountId)
+        return current.access !== previous.accessToken
       })
     } catch (error) {
       if (error instanceof LlmError) throw error
@@ -1341,17 +1438,21 @@ export class OpenAICodexAuth extends Service {
   private async finishCredential(credential: OpenAICodexCredential, signal: AbortSignal): Promise<void> {
     await this.assertCredentialWritable()
     throwIfCancelled(signal)
-    await withFileLock(this.filename, async () => {
+    await this.withAccountRefreshLock(credential.accountId, async () => {
       throwIfCancelled(signal)
-      await this.commitCredential(credential)
-      this.setCredentialAccount(credential.accountId)
-      this.usageGeneration += 1
-      if (this.usageRefresh !== undefined) this.usageRefresh.queued = true
-      this.usageCache = undefined
-      this.usageAccountId = undefined
-      this.directUsageAccountId = undefined
-      this.usageHasDirectDefault = false
-      this.usageError = undefined
+      await withFileLock(this.filename, async () => {
+        throwIfCancelled(signal)
+        await this.commitCredential(credential)
+        this.setCredentialAccount(credential.accountId)
+        this.usageGeneration += 1
+        if (this.usageRefresh !== undefined) this.usageRefresh.queued = true
+        this.usageCache = undefined
+        this.usageAccountId = undefined
+        this.directUsageAccountId = undefined
+        this.usageHasDirectDefault = false
+        this.usageError = undefined
+      })
+      await this.clearAccountRefreshJournal(credential.accountId)
     })
     this.lastLoginError = undefined
   }
@@ -1580,24 +1681,24 @@ export class OpenAICodexAuth extends Service {
   }
 
   private async setCurrentAccount(accountId: string): Promise<void> {
-    await withFileLock(this.filename, async () => {
-      const document = (await readCredentialDocument(this.filename))?.document
-      if (document === undefined || !document.accounts.some(account => account.accountId === accountId)) {
-        throw new AccountNotFoundError('OpenAI Codex account was not found')
-      }
-      if (document.currentAccountId !== accountId) {
-        await this.assertCredentialWritable()
-        await this.commitDocument({ ...document, currentAccountId: accountId })
-      }
-      this.resetCurrentAccountState(accountId)
+    await this.withAccountRefreshLock(accountId, async () => {
+      await this.reconcileAccountRefreshJournal(accountId)
+      await withFileLock(this.filename, async () => {
+        const document = (await readCredentialDocument(this.filename))?.document
+        if (document === undefined || !document.accounts.some(account => account.accountId === accountId)) {
+          throw new AccountNotFoundError('OpenAI Codex account was not found')
+        }
+        if (document.currentAccountId !== accountId) {
+          await this.assertCredentialWritable()
+          await this.commitDocument({ ...document, currentAccountId: accountId })
+        }
+        this.resetCurrentAccountState(accountId)
+      })
     })
   }
 
-  private async logout(accountId?: string): Promise<void> {
-    if (accountId === undefined) await this.cancelLogin(true)
-    let nextAccountId: string | undefined
-    let removedCurrent = false
-    await withFileLock(this.filename, async () => {
+  private async logoutAttempt(accountId: string | undefined, expectedPromotion: string | undefined): Promise<boolean> {
+    return withFileLock(this.filename, async () => {
       let parsed: ParsedCredentialDocument | undefined
       try {
         parsed = await readCredentialDocument(this.filename)
@@ -1610,28 +1711,55 @@ export class OpenAICodexAuth extends Service {
         } catch (failure) {
           return this.failAfterPublicationRollback(previous, undefined, failure)
         }
-        removedCurrent = true
         this.resetCurrentAccountState(undefined)
-        return
+        return true
       }
       const document = parsed?.document
       const target = accountId ?? document?.currentAccountId ?? undefined
       if (document === undefined || target === undefined
         || !document.accounts.some(account => account.accountId === target)) {
         if (accountId !== undefined) throw new AccountNotFoundError('OpenAI Codex account was not found')
-        return
+        return true
       }
-      removedCurrent = document.currentAccountId === target
+      const removedCurrent = document.currentAccountId === target
       const targetIndex = document.accounts.findIndex(account => account.accountId === target)
       const accounts = document.accounts.filter(account => account.accountId !== target)
       const currentAccountId = removedCurrent
         ? accounts[targetIndex]?.accountId ?? accounts[0]?.accountId ?? null
         : document.currentAccountId
+      const promotion = removedCurrent ? currentAccountId ?? undefined : undefined
+      if (promotion !== expectedPromotion) return false
       if (removedCurrent) await this.assertCredentialWritable()
       await this.commitDocument({ version: 2, currentAccountId, accounts })
-      nextAccountId = currentAccountId ?? undefined
-      if (removedCurrent) this.resetCurrentAccountState(nextAccountId)
+      await this.clearAccountRefreshJournal(target)
+      if (removedCurrent) this.resetCurrentAccountState(currentAccountId ?? undefined)
+      return true
     })
+  }
+
+  private async logout(accountId?: string): Promise<void> {
+    if (accountId === undefined) await this.cancelLogin(true)
+    while (true) {
+      let target: string | undefined
+      let expectedPromotion: string | undefined
+      try {
+        const document = (await readCredentialDocument(this.filename))?.document
+        target = accountId ?? document?.currentAccountId ?? undefined
+        if (document !== undefined && target !== undefined && document.currentAccountId === target) {
+          const targetIndex = document.accounts.findIndex(account => account.accountId === target)
+          const accounts = document.accounts.filter(account => account.accountId !== target)
+          expectedPromotion = accounts[targetIndex]?.accountId ?? accounts[0]?.accountId
+        }
+      } catch {}
+      const lockIds = [target, expectedPromotion].filter((value): value is string => value !== undefined)
+      const done = lockIds.length === 0
+        ? await this.logoutAttempt(accountId, undefined)
+        : await this.withAccountRefreshLocks(lockIds, async () => {
+            if (expectedPromotion !== undefined) await this.reconcileAccountRefreshJournal(expectedPromotion)
+            return this.logoutAttempt(accountId, expectedPromotion)
+          })
+      if (done) return
+    }
   }
 
   private async status(refresh: boolean, callbackUrl: string | undefined): Promise<Record<string, unknown>> {
@@ -1699,7 +1827,7 @@ export class OpenAICodexAuth extends Service {
           ? {} : { usage: this.usageCache },
         ...this.responseUsage === undefined || this.responseUsage.accountId !== credential.accountId
           ? {} : { responseUsage: {
-              amount: this.responseUsage.amount,
+              ...this.responseUsage.metadata,
               observedAt: this.responseUsage.observedAt,
             } },
         ...this.usageError === undefined ? {} : { usageError: this.usageError },
@@ -1708,16 +1836,302 @@ export class OpenAICodexAuth extends Service {
     }
   }
 
-  private async fetchUsage(credential: OpenAICodexCredential): Promise<UsageSummary> {
-    const response = await fetch(USAGE_URL, {
-      redirect: 'error',
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${credential.access}`,
-        'chatgpt-account-id': credential.accountId,
-        'user-agent': 'dsh-openai-codex-auth/0.5.0',
-      },
+  private accountRefreshJournalFilename(accountId: string): string {
+    const key = createHash('sha256').update(accountId).digest('hex').slice(0, 24)
+    return `${this.filename}.account-${key}-refresh.json`
+  }
+
+  private async readAccountRefreshJournal(accountId: string): Promise<CredentialRefreshJournal | undefined> {
+    const filename = this.accountRefreshJournalFilename(accountId)
+    let value: unknown
+    try {
+      value = JSON.parse(await readFile(filename, 'utf8'))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+    const journal = value as Partial<CredentialRefreshJournal> | null
+    if (journal === null || typeof journal !== 'object' || journal.version !== 1
+      || journal.accountId !== accountId || typeof journal.startedAt !== 'number'
+      || !Number.isFinite(journal.startedAt)
+      || (journal.phase !== 'pending' && journal.phase !== 'uncertain' && journal.phase !== 'refreshed')) {
+      throw new Error(`openai-codex-auth: invalid credential refresh journal ${filename}`)
+    }
+    const stored = validateCredential(journal.stored, filename)
+    if (stored.accountId !== accountId) throw new Error(`openai-codex-auth: invalid credential refresh journal ${filename}`)
+    if (journal.phase === 'refreshed') {
+      const refreshed = validateCredential(journal.refreshed, filename)
+      if (refreshed.accountId !== accountId) throw new Error(`openai-codex-auth: invalid credential refresh journal ${filename}`)
+      return { version: 1, accountId, startedAt: journal.startedAt, phase: 'refreshed', stored, refreshed }
+    }
+    return { version: 1, accountId, startedAt: journal.startedAt, phase: journal.phase, stored }
+  }
+
+  private writeAccountRefreshJournal(journal: CredentialRefreshJournal): Promise<void> {
+    return writeFileAtomic(
+      this.accountRefreshJournalFilename(journal.accountId),
+      JSON.stringify(journal),
+      { mode: 0o600 },
+    )
+  }
+
+  private async clearAccountRefreshJournal(accountId: string): Promise<void> {
+    try {
+      await unlink(this.accountRefreshJournalFilename(accountId))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+
+  private async removeDeadFileLock(filename: string): Promise<boolean> {
+    const lockFilename = `${filename}.lock`
+    let owner: number
+    try {
+      const text = (await readFile(lockFilename, 'utf8')).trim()
+      owner = Number(text)
+      if (!Number.isSafeInteger(owner) || owner <= 0) return false
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT'
+    }
+    try {
+      process.kill(owner, 0)
+      return false
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false
+      try {
+        await unlink(lockFilename)
+        return true
+      } catch (unlinkError) {
+        return (unlinkError as NodeJS.ErrnoException).code === 'ENOENT'
+      }
+    }
+  }
+
+  private async withAccountRefreshLock<T>(accountId: string, operation: () => Promise<T>): Promise<T> {
+    const filename = this.accountRefreshJournalFilename(accountId)
+    await this.removeDeadFileLock(filename)
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await withFileLock(filename, operation, { waitMs: ACCOUNT_REFRESH_LOCK_WAIT_MS })
+      } catch (error) {
+        if (!isFileLockTimeout(error) || attempt > 0 || !await this.removeDeadFileLock(filename)) throw error
+      }
+    }
+    throw new Error('OpenAI credential refresh lock could not be acquired')
+  }
+
+  private withAccountRefreshLocks<T>(accountIds: string[], operation: () => Promise<T>): Promise<T> {
+    const ordered = [...new Set(accountIds)].sort()
+    const acquire = (index: number): Promise<T> => index === ordered.length
+      ? operation()
+      : this.withAccountRefreshLock(ordered[index]!, () => acquire(index + 1))
+    return acquire(0)
+  }
+
+  private async reconcileAccountRefreshJournal(accountId: string): Promise<OpenAICodexCredential | undefined> {
+    const journal = await this.readAccountRefreshJournal(accountId)
+    if (journal === undefined) return undefined
+    const latest = (await readCredentialDocument(this.filename))?.document.accounts
+      .find(account => account.accountId === accountId)
+    if (latest === undefined
+      || latest.access !== journal.stored.access
+      || latest.refresh !== journal.stored.refresh
+      || latest.expires !== journal.stored.expires) {
+      await this.clearAccountRefreshJournal(accountId)
+      return latest
+    }
+    if (journal.phase !== 'refreshed') throw new CredentialRefreshUncertainError()
+    try {
+      const credential = await this.persistAccountUsageCredential(journal.stored, journal.refreshed)
+      await this.clearAccountRefreshJournal(accountId)
+      return credential
+    } catch (error) {
+      if (error instanceof AccountNotFoundError) await this.clearAccountRefreshJournal(accountId)
+      throw error
+    }
+  }
+
+  private async refreshManagedAccount(
+    stored: OpenAICodexCredential,
+    requireCurrent: boolean,
+    force = false,
+  ): Promise<OpenAICodexCredential | undefined> {
+    return this.withAccountRefreshLock(stored.accountId, async () => {
+      const recovered = await this.reconcileAccountRefreshJournal(stored.accountId)
+      if (recovered !== undefined) return recovered
+      const prepared = await withFileLock(this.filename, async () => {
+        const document = (await readCredentialDocument(this.filename))?.document
+        const latest = document?.accounts.find(account => account.accountId === stored.accountId)
+        if (document === undefined || latest === undefined) return undefined
+        if (requireCurrent && document.currentAccountId !== latest.accountId) return undefined
+        if (latest.access !== stored.access || latest.refresh !== stored.refresh || latest.expires !== stored.expires) {
+          return { credential: latest, changed: true }
+        }
+        if ((force || latest.expires <= Date.now() + TOKEN_REFRESH_PREEMPT_MS)
+          && document.currentAccountId === latest.accountId) await this.assertCredentialWritable()
+        return { credential: latest, changed: false }
+      })
+      if (prepared === undefined || prepared.changed
+        || (!force && prepared.credential.expires > Date.now() + TOKEN_REFRESH_PREEMPT_MS)) return prepared?.credential
+      const credential = prepared.credential
+      const pending: CredentialRefreshJournal = {
+        version: 1,
+        accountId: credential.accountId,
+        startedAt: Date.now(),
+        phase: 'pending',
+        stored: credential,
+      }
+      await this.writeAccountRefreshJournal(pending)
+      let refreshed: OpenAICodexCredential
+      try {
+        refreshed = await refreshToken(credential, AbortSignal.timeout(TOKEN_REFRESH_REQUEST_TIMEOUT_MS))
+      } catch (error) {
+        if (isDefinitiveOAuthRefreshError(error)) {
+          await this.clearAccountRefreshJournal(credential.accountId)
+          if (!force && !isPermanentRefreshError(error) && credential.expires > Date.now()) return credential
+          throw error
+        }
+        await this.writeAccountRefreshJournal({ ...pending, phase: 'uncertain' })
+        throw new CredentialRefreshUncertainError(error)
+      }
+      if (refreshed.accountId !== credential.accountId) {
+        await this.writeAccountRefreshJournal({ ...pending, phase: 'uncertain' })
+        throw new Error('OpenAI refresh changed the ChatGPT account identity')
+      }
+      await this.writeAccountRefreshJournal({ ...pending, phase: 'refreshed', refreshed })
+      try {
+        const persisted = await this.persistAccountUsageCredential(credential, refreshed)
+        await this.clearAccountRefreshJournal(credential.accountId)
+        return persisted
+      } catch (error) {
+        if (error instanceof AccountNotFoundError) await this.clearAccountRefreshJournal(credential.accountId)
+        throw error
+      }
     })
+  }
+
+  private async persistAccountUsageCredential(
+    stored: OpenAICodexCredential,
+    refreshed: OpenAICodexCredential,
+  ): Promise<OpenAICodexCredential> {
+    await this.removeDeadFileLock(this.filename)
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await withFileLock(this.filename, async () => {
+          const document = (await readCredentialDocument(this.filename))?.document
+          const latest = document?.accounts.find(account => account.accountId === stored.accountId)
+          if (document === undefined || latest === undefined) {
+            throw new AccountNotFoundError('OpenAI Codex account was removed while its quota was refreshing')
+          }
+          if (latest.access !== stored.access || latest.refresh !== stored.refresh || latest.expires !== stored.expires) {
+            return latest
+          }
+          const nextDocument = {
+            ...document,
+            accounts: document.accounts.map(account => account.accountId === stored.accountId ? refreshed : account),
+          }
+          if (document.currentAccountId === stored.accountId) {
+            await this.assertCredentialWritable()
+            await this.commitDocument(nextDocument)
+          } else {
+            await this.write(nextDocument)
+          }
+          return refreshed
+        }, { waitMs: CREDENTIAL_REFRESH_PERSIST_WAIT_MS })
+      } catch (error) {
+        if (!isFileLockTimeout(error) || attempt > 0 || !await this.removeDeadFileLock(this.filename)) throw error
+      }
+    }
+    throw new Error('OpenAI rotated credential could not be persisted')
+  }
+
+  private refreshAccountUsageCredential(stored: OpenAICodexCredential): Promise<OpenAICodexCredential> {
+    const active = this.accountUsageCredentialRefreshes.get(stored.accountId)
+    if (active !== undefined) return active
+    const operation = this.refreshManagedAccount(stored, false).then((credential) => {
+      if (credential === undefined) {
+        throw new AccountNotFoundError('OpenAI Codex account was removed while its quota was refreshing')
+      }
+      return credential
+    })
+    let tracked: Promise<OpenAICodexCredential>
+    tracked = operation.finally(() => {
+      if (this.accountUsageCredentialRefreshes.get(stored.accountId) === tracked) {
+        this.accountUsageCredentialRefreshes.delete(stored.accountId)
+      }
+    })
+    this.accountUsageCredentialRefreshes.set(stored.accountId, tracked)
+    return tracked
+  }
+
+  private async accountUsageCredential(
+    stored: OpenAICodexCredential,
+    signal?: AbortSignal,
+  ): Promise<OpenAICodexCredential> {
+    if (stored.expires > Date.now() + TOKEN_REFRESH_PREEMPT_MS) return stored
+    return waitForSignal(this.refreshAccountUsageCredential(stored), signal)
+  }
+
+  private async accountUsages(signal?: AbortSignal): Promise<AccountUsageResult[]> {
+    const prepared = await withFileLock(this.filename, async () => {
+      const document = (await readCredentialDocument(this.filename))?.document
+      if (document === undefined) return undefined
+      return {
+        cacheGeneration: this.usageGeneration,
+        requestGeneration: ++this.accountUsageRequestGeneration,
+        tasks: document.accounts.map(stored => ({
+          accountId: stored.accountId,
+          credential: this.accountUsageCredential(stored, signal),
+        })),
+      }
+    })
+    if (prepared === undefined) return []
+    const results = await Promise.all(prepared.tasks.map(async (task): Promise<AccountUsageResult> => {
+      try {
+        const credential = await task.credential
+        return {
+          accountId: task.accountId,
+          usage: await this.fetchUsage(credential, boundedAccountUsageSignal(signal)),
+        }
+      } catch (error) {
+        return { accountId: task.accountId, error: messageOf(error) }
+      }
+    }))
+    if (!signal?.aborted) {
+      const currentAccountId = (await readCredentialDocument(this.filename))?.document.currentAccountId
+      const current = results.find(row => row.accountId === currentAccountId)
+      if (current?.usage !== undefined
+        && this.usageGeneration === prepared.cacheGeneration
+        && this.accountUsageRequestGeneration === prepared.requestGeneration) {
+        this.usageGeneration += 1
+        this.usageCache = current.usage
+        this.usageAccountId = currentAccountId ?? undefined
+        this.usageHasDirectDefault = false
+        this.usageError = undefined
+      }
+    }
+    return results
+  }
+
+  private async fetchUsage(credential: OpenAICodexCredential, signal?: AbortSignal): Promise<UsageSummary> {
+    let response: Response
+    try {
+      response = await fetch(USAGE_URL, {
+        redirect: 'error',
+        ...signal === undefined ? {} : { signal },
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${credential.access}`,
+          'chatgpt-account-id': credential.accountId,
+          'user-agent': 'dsh-openai-codex-auth/0.5.0',
+        },
+      })
+    } catch (error) {
+      if (signal?.aborted) {
+        throw new Error(isTimeoutAbort(signal) ? 'Codex usage request timed out' : 'Codex usage request cancelled')
+      }
+      throw error
+    }
     if (!response.ok) throw new Error(`Codex usage request failed (HTTP ${response.status})`)
     return normalizeUsage(await response.json())
   }
@@ -1769,6 +2183,26 @@ export class OpenAICodexAuth extends Service {
       this.sendJson(res, 200, await this.status(url.searchParams.get('refresh') === '1', callback))
     } catch (error) {
       this.sendJson(res, 500, { error: messageOf(error) })
+    }
+  }
+
+  private async handleAccountUsage(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.trustedManagementRequest(req, res)) return
+    if (req.method !== 'POST') {
+      this.sendJson(res, 405, { error: 'POST only' }, { allow: 'POST' })
+      return
+    }
+    if (!this.requireCsrf(req, res)) return
+    const abort = new AbortController()
+    const onAborted = (): void => { abort.abort(new Error('Account quota request cancelled')) }
+    const observesAbort = typeof req.once === 'function' && typeof req.off === 'function'
+    if (observesAbort) req.once('aborted', onAborted)
+    try {
+      this.sendJson(res, 200, { accounts: await this.accountUsages(abort.signal) })
+    } catch (error) {
+      this.sendJson(res, error instanceof CredentialNotWritableError ? 409 : 500, { error: messageOf(error) })
+    } finally {
+      if (observesAbort) req.off('aborted', onAborted)
     }
   }
 

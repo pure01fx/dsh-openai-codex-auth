@@ -46,7 +46,7 @@ describe('generated package artifacts', () => {
     expect(parseCodexResponseUsageMetadata).toBeTypeOf('function')
     expect(mergeDirectUsage).toBeTypeOf('function')
     expect(TRACKED_CODEX_COMMIT).toMatch(/^[0-9a-f]{40}$/u)
-    expect(CODEX_CLIENT_VERSION).toBe('0.151.0')
+    expect(CODEX_CLIENT_VERSION).toBe('0.153.4')
     const adapter = new NativeCodexAdapter({
       etag: () => undefined,
       list: async () => [{

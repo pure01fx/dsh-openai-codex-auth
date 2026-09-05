@@ -17,6 +17,17 @@ export const DEFAULT_CODEX_INSTRUCTIONS = 'You are Codex, an AI coding agent. He
 const CALL_ID_MAX_LENGTH = 64
 const CALL_ID_PREFIX = 'call_'
 const MAX_RETAINED_RESPONSE_BYTES = 64 * 1024 * 1024
+const UUID_NAMESPACE_OID = Buffer.from('6ba7b8129dad11d180b400c04fd430c8', 'hex')
+
+function uuidV5(namespace: Uint8Array, name: string): string {
+  const bytes = createHash('sha1').update(namespace).update(name).digest().subarray(0, 16)
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+function uuidBytes(value: string): Buffer { return Buffer.from(value.replaceAll('-', ''), 'hex') }
 
 export interface ResolvedImagePart { type: 'image'; mediaType: string; dataBase64: string }
 export interface ResolvedToolResultPart {
@@ -59,6 +70,14 @@ export function toResponsesTools(tools: readonly ToolSchema[]): Record<string, u
   return tools.map(tool => ({
     type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters,
   }))
+}
+
+/** Responses Lite loads ordinary DSH functions through one canonical namespace. */
+export function toResponsesLiteTools(tools: readonly ToolSchema[]): Record<string, unknown>[] {
+  const functions = toResponsesTools(tools)
+  return functions.length === 0 ? [] : [{
+    type: 'namespace', name: 'functions', description: '', tools: functions,
+  }]
 }
 
 /** Convert resolved DSH messages into Responses instructions and ordered input items. */
@@ -176,9 +195,12 @@ function assertSupportedOptions(options: GenerateOptions): void {
   }
 }
 
-export interface ResponsesRequestMode { serviceTier?: 'priority' }
+export interface ResponsesRequestMode {
+  serviceTier?: 'priority'
+  responsesLite?: { defaultVerbosity?: string; instructionsTemplate?: string }
+}
 
-/** Build the canonical Standard/Fast HTTP Responses body. */
+/** Build the canonical Standard/Fast or model-specific Responses Lite body. */
 export function codexRequestBody(
   options: GenerateOptions,
   messages: readonly ResolvedMessage[],
@@ -189,21 +211,67 @@ export function codexRequestBody(
     throw fixedError('native Codex service tier is invalid', 'INVALID_ARGS')
   }
   const resolved = toResponsesInput(messages, options.system)
-  return {
+  const instructions = resolved.instructions ?? DEFAULT_CODEX_INSTRUCTIONS
+  const input = normalizeCodexCallIds(resolved.input)
+  const common = {
     model: options.model,
-    instructions: resolved.instructions ?? DEFAULT_CODEX_INSTRUCTIONS,
-    input: normalizeCodexCallIds(resolved.input),
-    ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toResponsesTools(options.tools) } : {},
     tool_choice: 'auto',
-    parallel_tool_calls: true,
-    ...options.reasoningEffort === undefined ? {}
-      : { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } },
     store: false,
     stream: true,
     include: ['reasoning.encrypted_content'],
     ...mode.serviceTier === undefined ? {} : { service_tier: mode.serviceTier },
     ...options.sessionId === undefined ? {} : { prompt_cache_key: String(options.sessionId) },
+  }
+  if (mode.responsesLite === undefined) {
+    return {
+      ...common,
+      instructions,
+      input,
+      ...options.tools !== undefined && options.tools.length > 0
+        ? { tools: toResponsesTools(options.tools) } : {},
+      parallel_tool_calls: true,
+      ...options.reasoningEffort === undefined ? {}
+        : { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } },
+    }
+  }
+
+  const tools = toResponsesLiteTools(options.tools ?? [])
+  const baseInstructions = mode.responsesLite.instructionsTemplate ?? instructions
+  const contextualInstructions = mode.responsesLite.instructionsTemplate !== undefined
+      && resolved.instructions !== undefined && resolved.instructions !== baseInstructions
+    ? [{
+        type: 'message', role: 'developer',
+        content: [{ type: 'input_text', text: resolved.instructions }],
+      }]
+    : []
+  const prefixNamespace = uuidBytes(uuidV5(
+    UUID_NAMESPACE_OID, String(options.sessionId ?? options.model),
+  ))
+  const prefix = [{
+    type: 'additional_tools',
+    id: `at_${uuidV5(prefixNamespace, JSON.stringify(tools))}`,
+    role: 'developer',
+    tools,
+  }, {
+    type: 'message',
+    id: `msg_${uuidV5(prefixNamespace, baseInstructions)}`,
+    role: 'developer',
+    content: [{ type: 'input_text', text: baseInstructions }],
+    internal_chat_message_metadata_passthrough: {
+      content_item_kinds: ['model.base_instructions'],
+    },
+  }]
+  return {
+    ...common,
+    input: [...prefix, ...contextualInstructions, ...input],
+    parallel_tool_calls: false,
+    reasoning: {
+      ...options.reasoningEffort === undefined ? {} : { effort: String(options.reasoningEffort) },
+      summary: 'auto',
+      context: 'all_turns',
+    },
+    ...mode.responsesLite.defaultVerbosity === undefined ? {}
+      : { text: { verbosity: mode.responsesLite.defaultVerbosity } },
   }
 }
 
@@ -272,7 +340,7 @@ export function responsesFailure(code?: string, message?: string): LlmError {
 }
 
 interface ResponsesOutputItem {
-  type?: string; id?: string; call_id?: string; name?: string; arguments?: string
+  type?: string; id?: string; call_id?: string; name?: string; namespace?: string; arguments?: string
   encrypted_content?: string; summary?: unknown[]; status?: string
   content?: Array<{ type?: string; text?: string }>
 }
@@ -435,6 +503,8 @@ export class ResponsesStreamTranslator {
         if (item.type === 'function_call') {
           if (item.call_id === undefined || item.call_id.length === 0
             || item.name === undefined || item.name.length === 0
+            || (item.namespace !== undefined && (typeof item.namespace !== 'string'
+              || item.namespace.length === 0 || Buffer.byteLength(item.namespace) > 256))
             || typeof item.arguments !== 'string') {
             throw fixedError('native Codex function call has invalid content', 'MALFORMED_RESPONSE')
           }
@@ -453,6 +523,7 @@ export class ResponsesStreamTranslator {
           this.close(key, chunks)
           if (this.replayContext !== undefined) this.replayCapture?.add({
             type: 'function_call', ...(replayId === undefined ? {} : { id: replayId }),
+            ...(item.namespace === undefined ? {} : { namespace: item.namespace }),
             block: block.index,
           })
         } else if (item.type === 'message') {

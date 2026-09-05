@@ -70,6 +70,57 @@ afterEach(() => {
 })
 
 describe('NativeCodexHttpTransport', () => {
+  it('sends Astra through HTTP Responses Lite without changing Standard requests', async () => {
+    const captured: Array<{ headers: Headers; body: Record<string, unknown> }> = []
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      createRequestId: () => 'request-astra',
+      fetch: vi.fn(async (_input, init) => {
+        captured.push({
+          headers: new Headers(init?.headers),
+          body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        })
+        return successResponse()
+      }),
+    })
+    const generation = request({
+      model: 'gpt-6-astra', system: 'Astra instructions',
+      tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }],
+    })
+
+    await collect(transport.stream(generation, {
+      responsesLite: { defaultVerbosity: 'low' },
+    }))
+    await collect(transport.stream({ ...generation, model: 'gpt-standard' }))
+
+    expect(captured[0]?.headers.get('x-openai-internal-codex-responses-lite')).toBe('true')
+    expect(captured[1]?.headers.get('x-openai-internal-codex-responses-lite')).toBeNull()
+    expect(captured[0]?.body).toMatchObject({
+      model: 'gpt-6-astra',
+      parallel_tool_calls: false,
+      reasoning: { summary: 'auto', context: 'all_turns' },
+      text: { verbosity: 'low' },
+      input: [
+        {
+          type: 'additional_tools', role: 'developer',
+          tools: [{
+            type: 'namespace', name: 'functions', description: '',
+            tools: [{ type: 'function', name: 'lookup' }],
+          }],
+        },
+        {
+          type: 'message', role: 'developer',
+          content: [{ type: 'input_text', text: 'Astra instructions' }],
+        },
+      ],
+    })
+    expect(captured[0]?.body).not.toHaveProperty('instructions')
+    expect(captured[0]?.body).not.toHaveProperty('tools')
+    expect(captured[1]?.body).toMatchObject({
+      model: 'gpt-standard', instructions: 'Astra instructions', parallel_tool_calls: true,
+    })
+  })
+
   it('cleans watchdog timers when the stream consumer returns early', async () => {
     vi.useFakeTimers()
     let cancelled = false
@@ -310,7 +361,14 @@ describe('NativeCodexHttpTransport', () => {
 
     expect(usage).toHaveBeenCalledWith({
       accountId: CREDENTIAL.accountId,
-      metadata: { amount: '0.12345678901234567890' },
+      metadata: {
+        amount: '0.12345678901234567890',
+        metadata: {
+          input_tokens: 12, output_tokens: 3,
+          input_tokens_details: { cached_tokens: 4, cache_write_tokens: 2 },
+          output_tokens_details: { reasoning_tokens: 1 },
+        },
+      },
     })
     expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBe('error')
   })

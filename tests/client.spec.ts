@@ -103,14 +103,41 @@ describe('Codex multi-account source contract', () => {
     expect(source).toContain('const currentAccountId = status && status.currentAccountId')
     expect(source).toContain('account.current === true || account.accountId === currentAccountId')
     expect(source).toContain("h('strong', null, '已添加账号')")
-    expect(source).toContain("' · 当前账号'")
+    expect(source).toContain("className: 'codexBadge connected' }, '当前账号'")
   })
 
   it('prefers optional email while retaining accountId as secondary identity', () => {
     expect(source).toContain('currentAccount && currentAccount.email ? currentAccount.email : shortAccount(status && status.accountId)')
-    expect(source).toContain("h('span', { title: account.accountId }")
+    expect(source).toContain("h('div', { className: 'codexAccountDetails', title: account.accountId }")
     expect(source).toContain("h('strong', null, account.email || shortAccount(account.accountId))")
-    expect(source).toContain("account.email ? h('span', null, ' · ' + shortAccount(account.accountId)) : null")
+    expect(source).toContain("account.email ? h('span', null, shortAccount(account.accountId)) : null")
+  })
+
+  it('uses a full-width single-column account layout with non-wrapping actions', () => {
+    expect(source).toContain('.codexAccounts{margin-top:14px;margin-bottom:20px')
+    expect(source).toContain('.codexAccountList{display:flex;flex-direction:column')
+    expect(source).toContain('.codexAccountOption{display:flex;align-items:center;justify-content:space-between')
+    expect(source).toContain('.codexAccountActions{flex:none;flex-wrap:nowrap;margin-top:0}')
+    expect(source).toContain('.codexAccountActions .codexButton{white-space:nowrap}')
+    expect(source).toContain("className: 'codexActions codexAccountActions'")
+  })
+
+  it('refreshes every account quota once on settings open and exposes a manual refresh button', () => {
+    const refresh = between('const refreshAccountUsages = useCallback(async () => {', 'const startDevice = async () => {')
+    expect(refresh).toContain("post('/accounts/usage')")
+    expect(refresh).toContain('accountUsageScope.current === accountUsageIds')
+    expect(refresh).toContain('void refreshAccountUsages()')
+    expect(source).toContain("accountUsageBusy ? '刷新中…' : '刷新额度'")
+    expect(source).toContain('h(AccountQuotaSummary, { entry: accountUsages[account.accountId], loading: accountUsageBusy })')
+    expect(source).toContain("'额度重置 '")
+    expect(source).toContain("'剩余 ' + Math.max(0, Math.floor(usage.resetCredits)) + ' 次'")
+    expect(source).toContain("'Credits '")
+    expect(source).toContain("role: 'status' }, '额度读取失败：' + entry.error")
+    expect(refresh).toContain('await requestStatus(false)')
+    expect(refresh).toContain('generation === accountUsageGeneration.current')
+    expect(refresh).toContain("setAccountStatusSyncError('额度已刷新，但账号状态同步失败：' + messageOf(statusError))")
+    expect(refresh).toContain("setAccountStatusSyncError('')")
+    expect(source).toContain('每个账号的额度仅在打开本页或点击刷新时读取')
   })
 
   it('switches and removes a selected account through the CSRF post helper', () => {

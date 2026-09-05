@@ -48,6 +48,11 @@ export interface NativeCodexModel {
   additionalSpeedTiers: readonly string[]
   serviceTiers: readonly NativeCodexServiceTier[]
   defaultServiceTier?: string
+  /** Requires the model-specific Responses Lite wire contract, not Standard Responses. */
+  useResponsesLite?: boolean
+  /** Catalog-provided defaults needed to construct the model-specific request. */
+  defaultVerbosity?: string
+  instructionsTemplate?: string
   contextWindow?: number
   inputModalities: readonly string[]
 }
@@ -209,6 +214,7 @@ function parseModel(value: unknown): NativeCodexModel {
   const additionalSpeedTiers = strictStringList(row?.additional_speed_tiers)
   const serviceTiers = parseServiceTiers(row?.service_tiers)
   const inputModalities = strictStringList(row?.input_modalities, ['text', 'image'])
+  const useResponsesLite = row?.use_responses_lite ?? false
   if (slug === undefined
     || displayName === undefined
     || reasoning === undefined
@@ -219,6 +225,7 @@ function parseModel(value: unknown): NativeCodexModel {
     || priority < -2_147_483_648 || priority > 2_147_483_647
     || additionalSpeedTiers === undefined
     || serviceTiers === undefined
+    || typeof useResponsesLite !== 'boolean'
     || inputModalities === undefined
     || !inputModalities.every(value => ['text', 'image', 'audio'].includes(value))) {
     throw invalidCatalog('native Codex catalog contained an invalid model entry')
@@ -241,6 +248,18 @@ function parseModel(value: unknown): NativeCodexModel {
     && nonEmptyString(row.multi_agent_reasoning_effort) === undefined) {
     throw invalidCatalog('native Codex catalog contained an invalid multi-agent reasoning effort')
   }
+  if (row.default_verbosity !== undefined && row.default_verbosity !== null
+    && nonEmptyString(row.default_verbosity) === undefined) {
+    throw invalidCatalog('native Codex catalog contained an invalid default verbosity')
+  }
+  const modelMessages = row.model_messages === undefined || row.model_messages === null
+    ? undefined : record(row.model_messages)
+  if ((row.model_messages !== undefined && row.model_messages !== null && modelMessages === undefined)
+    || (modelMessages?.instructions_template !== undefined
+      && modelMessages.instructions_template !== null
+      && nonEmptyString(modelMessages.instructions_template) === undefined)) {
+    throw invalidCatalog('native Codex catalog contained invalid model instructions')
+  }
   for (const key of ['context_window', 'max_context_window'] as const) {
     if (row[key] !== undefined && row[key] !== null && positiveNumber(row[key]) === undefined) {
       throw invalidCatalog('native Codex catalog contained an invalid context window')
@@ -250,6 +269,8 @@ function parseModel(value: unknown): NativeCodexModel {
   const defaultReasoningLevel = nonEmptyString(row.default_reasoning_level)
   const multiAgentReasoningEffort = nonEmptyString(row.multi_agent_reasoning_effort)
   const defaultServiceTier = nonEmptyString(row.default_service_tier)
+  const defaultVerbosity = nonEmptyString(row.default_verbosity)
+  const instructionsTemplate = nonEmptyString(modelMessages?.instructions_template)
   const contextWindow = positiveNumber(row.context_window) ?? positiveNumber(row.max_context_window)
   return {
     slug,
@@ -264,6 +285,9 @@ function parseModel(value: unknown): NativeCodexModel {
     additionalSpeedTiers,
     serviceTiers,
     ...defaultServiceTier === undefined ? {} : { defaultServiceTier },
+    useResponsesLite,
+    ...defaultVerbosity === undefined ? {} : { defaultVerbosity },
+    ...instructionsTemplate === undefined ? {} : { instructionsTemplate },
     ...contextWindow === undefined ? {} : { contextWindow },
     inputModalities,
   }

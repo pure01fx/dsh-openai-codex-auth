@@ -63,6 +63,9 @@ describe('NativeCodexCatalog', () => {
         priority: 1,
         additionalSpeedTiers: [],
         serviceTiers: [],
+        useResponsesLite: true,
+        defaultVerbosity: 'low',
+        instructionsTemplate: 'Astra catalog instructions',
         contextWindow: 272000,
         inputModalities: ['text', 'image'],
       },
@@ -130,6 +133,7 @@ describe('NativeCodexCatalog', () => {
       additionalSpeedTiers: ['fast'],
       serviceTiers: [{ id: 'priority', name: 'Fast', description: 'Priority processing' }],
       defaultServiceTier: 'default',
+      useResponsesLite: false,
       contextWindow: 128000,
       inputModalities: ['text', 'audio', 'image'],
     }])

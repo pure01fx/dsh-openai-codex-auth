@@ -10,7 +10,7 @@ const MAX_REPLAY_STATE_BYTES = 64 * 1024 * 1024
 export type NativeCodexReplayDescriptor =
   | { type: 'message'; id?: string; blocks: number[] }
   | { type: 'reasoning'; id?: string; blocks: number[]; encryptedContent?: string }
-  | { type: 'function_call'; id?: string; block: number }
+  | { type: 'function_call'; id?: string; namespace?: string; block: number }
 
 export interface NativeCodexReplayState {
   kind: typeof NATIVE_CODEX_REPLAY_KIND
@@ -108,11 +108,16 @@ function parseDescriptor(value: unknown): NativeCodexReplayDescriptor {
     }
   }
   if (row.type === 'function_call') {
+    const namespace = row.namespace === undefined ? undefined : boundedString(row.namespace)
     if (!Number.isSafeInteger(row.block) || Number(row.block) < 0
-      || !onlyKeys(row, ['type', 'id', 'block'])) {
+      || (row.namespace !== undefined && namespace === undefined)
+      || !onlyKeys(row, ['type', 'id', 'namespace', 'block'])) {
       throw failure('native Codex function replay descriptor is invalid')
     }
-    return { type: 'function_call', ...(id === undefined ? {} : { id }), block: Number(row.block) }
+    return {
+      type: 'function_call', ...(id === undefined ? {} : { id }),
+      ...(namespace === undefined ? {} : { namespace }), block: Number(row.block),
+    }
   }
   throw failure('native Codex replay descriptor type is unsupported')
 }
@@ -253,6 +258,7 @@ export function replayAssistantInput(
       const block = blockAt(content, used, item.block, 'tool-call') as Extract<ContentBlock, { type: 'tool-call' }>
       input.push({
         type: 'function_call', ...(item.id === undefined ? {} : { id: item.id }),
+        ...(item.namespace === undefined ? {} : { namespace: item.namespace }),
         call_id: String(block.id), name: block.name, arguments: block.arguments,
       })
     }

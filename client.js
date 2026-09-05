@@ -181,6 +181,7 @@ window.__ModuleLoader__.load({
       .codexButton:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l3)}.codexButton:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.codexButton:disabled{color:var(--dsw-alias-label-dimmed);cursor:not-allowed}
       .codexButton.primary{border-color:transparent;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}.codexButton.primary:hover:not(:disabled){border-color:transparent;background:var(--dsw-alias-button-primary-hover)}.codexButton.danger{color:var(--dsw-alias-state-error-primary)}
       .codexGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:14px}
+      .codexAccounts{margin-top:14px;margin-bottom:20px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:14px}.codexAccountList{display:flex;flex-direction:column;gap:8px}.codexAccountOption{display:flex;align-items:center;justify-content:space-between;gap:18px;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px 14px;background:var(--dsw-alias-bg-layer-2)}.codexAccountDetails{flex:1;min-width:0}.codexAccountTitle{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;min-width:0}.codexAccountTitle strong{font-size:13px;font-weight:500;overflow-wrap:anywhere}.codexAccountTitle .codexBadge{padding:1px 8px;line-height:18px}.codexAccountMeta{display:flex;flex-wrap:wrap;gap:2px 14px;margin-top:4px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.codexAccountActions{flex:none;flex-wrap:nowrap;margin-top:0}.codexAccountActions .codexButton{white-space:nowrap}.codexAccountHeaderActions{display:flex;align-items:center;gap:10px}.codexAccountRefresh{min-height:28px;padding:3px 9px;font-size:12px}.codexAccountQuota{display:flex;flex-wrap:wrap;gap:5px 14px;margin-top:10px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:9px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}.codexAccountQuotaItem{white-space:nowrap}.codexAccountQuotaItem strong{color:var(--dsw-alias-label-primary);font-weight:500;font-variant-numeric:tabular-nums}.codexAccountQuotaStatus{color:var(--dsw-alias-label-tertiary)}.codexAccountQuotaStatus.error{color:var(--dsw-alias-state-error-primary)}
       .codexUsage{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px 14px;background:var(--dsw-alias-bg-layer-2)}
       .codexUsageHead{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.codexUsageName{font-size:13px;font-weight:500}.codexUsageValue{font-size:12px;color:var(--dsw-alias-label-tertiary)}
       .codexBar{height:6px;margin:10px 0 8px;overflow:hidden;border-radius:999px;background:var(--dsw-alias-bg-layer-1)}.codexBarFill{height:100%;border-radius:inherit;background:var(--dsw-alias-state-success-primary);transition:width .25s ease}.codexBarFill.high{background:var(--dsw-alias-state-warn-label)}
@@ -203,7 +204,7 @@ window.__ModuleLoader__.load({
       .codexQuotaTrack{fill:none;stroke:var(--dsw-alias-border-l3);stroke-width:2px}.codexQuotaAvailable{fill:none;stroke:var(--dsw-alias-state-success-primary);stroke-width:2px;stroke-linecap:round;transition:stroke .25s ease,stroke-dasharray .25s ease,stroke-dashoffset .25s ease}.codexQuotaAvailable.high{stroke:var(--dsw-alias-state-warn-label)}.codexQuotaAvailable.critical{stroke:var(--dsw-alias-state-error-primary)}.codexQuotaLoading{animation:codexQuotaPulse .8s ease-in-out infinite alternate}
       .codexQuotaPanel{z-index:100;box-sizing:border-box;width:272px;border:1px solid var(--dsw-alias-border-inverted);border-radius:12px;padding:12px;background:var(--dsw-specific-menu);box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-secondary);cursor:default;font-size:12px;line-height:20px;position:absolute;right:0;bottom:calc(100% + 8px)}.codexQuotaPanelHead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.codexQuotaPanelHead strong{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500}.codexQuotaPanelHead span{color:var(--dsw-alias-label-tertiary)}
       .codexQuotaWindow{padding:7px 0}.codexQuotaWindow+.codexQuotaWindow{border-top:1px solid var(--dsw-alias-border-l2)}.codexQuotaWindowHead{display:flex;align-items:center;justify-content:space-between;gap:10px}.codexQuotaWindowHead strong{font-weight:500;color:var(--dsw-alias-label-secondary)}.codexQuotaWindowHead span{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}.codexQuotaBar{height:4px;margin:6px 0;border-radius:999px;overflow:hidden;background:var(--dsw-alias-interactive-bg-hover)}.codexQuotaBarFill{height:100%;border-radius:inherit;background:var(--dsw-alias-state-success-primary)}.codexQuotaBarFill.high{background:var(--dsw-alias-state-warn-label)}.codexQuotaBarFill.critical{background:var(--dsw-alias-state-error-primary)}.codexQuotaReset{color:var(--dsw-alias-label-tertiary)}.codexQuotaMessage{margin:4px 0;color:var(--dsw-alias-label-tertiary)}.codexQuotaMessage.error{color:var(--dsw-alias-state-error-primary)}
-      @keyframes codexPulse{to{background-position:-200% 0}}@keyframes codexQuotaPulse{to{opacity:.35}}@media(prefers-reduced-motion:reduce){.codexSkeleton,.codexQuotaLoading{animation:none}}@media(max-width:620px){.codexHero{padding:14px;flex-direction:column}.codexBody{padding:14px}.codexGrid,.codexModelVisibilityList{grid-template-columns:1fr}.codexCode{font-size:20px}}
+      @keyframes codexPulse{to{background-position:-200% 0}}@keyframes codexQuotaPulse{to{opacity:.35}}@media(prefers-reduced-motion:reduce){.codexSkeleton,.codexQuotaLoading{animation:none}}@media(max-width:620px){.codexHero{padding:14px;flex-direction:column}.codexBody{padding:14px}.codexGrid,.codexModelVisibilityList{grid-template-columns:1fr}.codexAccountOption{align-items:stretch;flex-direction:column;gap:10px}.codexAccountActions{align-self:flex-start}.codexCode{font-size:20px}}
     `
     if (typeof document !== 'undefined' && document.querySelector('style[data-plugin="' + PLUGIN_ID + '"]') === null) {
       const style = document.createElement('style')
@@ -339,6 +340,26 @@ window.__ModuleLoader__.load({
         ),
         h('div', { className: 'codexReset' }, formatReset(props.window.resetAt)),
       )
+    }
+
+    function AccountQuotaSummary(props) {
+      const entry = props.entry
+      if (props.loading && !entry) return h('div', { className: 'codexAccountQuota' }, h('span', { className: 'codexAccountQuotaStatus' }, '正在读取额度…'))
+      if (!entry) return h('div', { className: 'codexAccountQuota' }, h('span', { className: 'codexAccountQuotaStatus' }, '尚未读取额度'))
+      if (entry.error) return h('div', { className: 'codexAccountQuota' }, h('span', { className: 'codexAccountQuotaStatus error', role: 'status' }, '额度读取失败：' + entry.error))
+      const usage = entry.usage
+      if (!usage) return h('div', { className: 'codexAccountQuota' }, h('span', { className: 'codexAccountQuotaStatus' }, '暂无额度数据'))
+      const rows = []
+      if (usage.planType) rows.push(h('span', { className: 'codexAccountQuotaItem', key: 'plan' }, String(usage.planType).toUpperCase()))
+      if (displayQuotaWindow(usage.primary)) rows.push(h('span', { className: 'codexAccountQuotaItem', key: 'primary' }, quotaWindowName(usage.primary, false) + ' ', h('strong', null, '剩余 ' + Math.max(0, Math.round(100 - usage.primary.usedPercent)) + '%')))
+      if (displayQuotaWindow(usage.secondary)) rows.push(h('span', { className: 'codexAccountQuotaItem', key: 'secondary' }, quotaWindowName(usage.secondary, true) + ' ', h('strong', null, '剩余 ' + Math.max(0, Math.round(100 - usage.secondary.usedPercent)) + '%')))
+      if (Number.isFinite(usage.resetCredits)) rows.push(h('span', { className: 'codexAccountQuotaItem', key: 'resetCredits' }, '额度重置 ', h('strong', null, '剩余 ' + Math.max(0, Math.floor(usage.resetCredits)) + ' 次')))
+      if (usage.credits) {
+        const credits = usage.credits.unlimited ? '无限' : usage.credits.hasCredits ? (usage.credits.balance || '可用') : '不可用'
+        rows.push(h('span', { className: 'codexAccountQuotaItem', key: 'credits' }, 'Credits ', h('strong', null, credits)))
+      }
+      if (usage.fetchedAt) rows.push(h('span', { className: 'codexAccountQuotaItem', key: 'updated' }, '更新 ' + new Date(usage.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })))
+      return h('div', { className: 'codexAccountQuota' }, rows.length > 0 ? rows : h('span', { className: 'codexAccountQuotaStatus' }, '暂无额度数据'))
     }
 
     function quotaTone(used) {
@@ -484,7 +505,13 @@ window.__ModuleLoader__.load({
       const [manualInput, setManualInput] = useState('')
       const [now, setNow] = useState(Date.now())
       const [modelVisibility, setModelVisibility] = useState(readModelVisibility)
+      const [accountUsages, setAccountUsages] = useState({})
+      const [accountUsageBusy, setAccountUsageBusy] = useState(false)
+      const [accountUsageError, setAccountUsageError] = useState('')
+      const [accountStatusSyncError, setAccountStatusSyncError] = useState('')
       const probeGeneration = useRef(0)
+      const accountUsageGeneration = useRef(0)
+      const accountUsageScope = useRef('')
 
       useEffect(() => {
         const reload = () => { setModelVisibility(readModelVisibility()) }
@@ -565,6 +592,52 @@ window.__ModuleLoader__.load({
         }
         return value
       }, [status])
+
+      const refreshAccountUsages = useCallback(async () => {
+        const generation = ++accountUsageGeneration.current
+        setAccountUsageBusy(true)
+        setAccountUsageError('')
+        setAccountStatusSyncError('')
+        try {
+          const value = await post('/accounts/usage')
+          const next = {}
+          for (const row of Array.isArray(value.accounts) ? value.accounts : []) {
+            if (row && typeof row.accountId === 'string') next[row.accountId] = row
+          }
+          if (generation === accountUsageGeneration.current) {
+            setAccountUsages(next)
+            try {
+              await requestStatus(false)
+            } catch (statusError) {
+              if (generation === accountUsageGeneration.current) {
+                setAccountStatusSyncError('额度已刷新，但账号状态同步失败：' + messageOf(statusError))
+              }
+            }
+          }
+        } catch (usageError) {
+          if (generation === accountUsageGeneration.current) setAccountUsageError(messageOf(usageError))
+        } finally {
+          if (generation === accountUsageGeneration.current) setAccountUsageBusy(false)
+        }
+      }, [post])
+
+      const accountUsageIds = status && Array.isArray(status.accounts)
+        ? status.accounts.map(account => account.accountId).filter(Boolean).sort().join('\n')
+        : ''
+      useEffect(() => {
+        if (!status || !status.csrf || !accountUsageIds) {
+          if (accountUsageScope.current) {
+            accountUsageScope.current = ''
+            setAccountUsages({})
+            setAccountUsageError('')
+            setAccountStatusSyncError('')
+          }
+          return
+        }
+        if (accountUsageScope.current === accountUsageIds) return
+        accountUsageScope.current = accountUsageIds
+        void refreshAccountUsages()
+      }, [accountUsageIds, refreshAccountUsages, status && status.csrf])
 
       const startDevice = async () => {
         setBusy('device')
@@ -787,23 +860,33 @@ window.__ModuleLoader__.load({
                 )
               : null,
             !loading && accounts.length > 0
-              ? h('div', { className: 'codexModelVisibility' },
+              ? h('div', { className: 'codexAccounts' },
                   h('div', { className: 'codexModelVisibilityHead' },
                     h('strong', null, '已添加账号'),
-                    h('span', { className: 'codexMeta' }, accounts.length + ' 个'),
+                    h('div', { className: 'codexAccountHeaderActions' },
+                      h('span', { className: 'codexMeta' }, accounts.length + ' 个'),
+                      h('button', { type: 'button', className: 'codexButton codexAccountRefresh', disabled: accountUsageBusy, onClick: () => { void refreshAccountUsages() } }, accountUsageBusy ? '刷新中…' : '刷新额度'),
+                    ),
                   ),
-                  h('p', { className: 'codexModelVisibilityHint' }, '当前账号用于新的 Codex 请求；你可以切换或单独移除任意账号。'),
-                  h('div', { className: 'codexModelVisibilityList' }, accounts.map((account) => {
+                  h('p', { className: 'codexModelVisibilityHint' }, '当前账号用于新的 Codex 请求；每个账号的额度仅在打开本页或点击刷新时读取。'),
+                  accountUsageError ? h('p', { className: 'codexAccountQuotaStatus error', role: 'status' }, '额度刷新失败：' + accountUsageError) : null,
+                  accountStatusSyncError ? h('p', { className: 'codexAccountQuotaStatus error', role: 'status' }, accountStatusSyncError) : null,
+                  h('div', { className: 'codexAccountList' }, accounts.map((account) => {
                     const isCurrent = account.current === true || account.accountId === currentAccountId
                     const accountBusy = busy === 'current:' + account.accountId || busy === 'remove:' + account.accountId
-                    return h('div', { className: 'codexModelVisibilityOption', key: account.accountId },
-                      h('span', { title: account.accountId },
-                        h('strong', null, account.email || shortAccount(account.accountId)),
-                        account.email ? h('span', null, ' · ' + shortAccount(account.accountId)) : null,
-                        h('span', null, isCurrent ? ' · 当前账号' : ''),
-                        account.expiresAt ? h('span', null, ' · 到期 ' + new Date(account.expiresAt).toLocaleString()) : null,
+                    return h('div', { className: 'codexAccountOption', key: account.accountId },
+                      h('div', { className: 'codexAccountDetails', title: account.accountId },
+                        h('div', { className: 'codexAccountTitle' },
+                          h('strong', null, account.email || shortAccount(account.accountId)),
+                          isCurrent ? h('span', { className: 'codexBadge connected' }, '当前账号') : null,
+                        ),
+                        h('div', { className: 'codexAccountMeta' },
+                          account.email ? h('span', null, shortAccount(account.accountId)) : null,
+                          account.expiresAt ? h('span', null, '到期 ' + new Date(account.expiresAt).toLocaleString()) : null,
+                        ),
+                        h(AccountQuotaSummary, { entry: accountUsages[account.accountId], loading: accountUsageBusy }),
                       ),
-                      h('div', { className: 'codexActions' },
+                      h('div', { className: 'codexActions codexAccountActions' },
                         !isCurrent ? h('button', { type: 'button', className: 'codexButton', disabled: Boolean(busy), onClick: () => { void setCurrentAccount(account.accountId) } }, accountBusy && busy.startsWith('current:') ? '切换中…' : '设为当前') : null,
                         h('button', { type: 'button', className: 'codexButton danger', disabled: Boolean(busy), onClick: () => { void removeAccount(account.accountId) } }, accountBusy && busy.startsWith('remove:') ? '移除中…' : '移除'),
                       ),

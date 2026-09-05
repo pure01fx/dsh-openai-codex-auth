@@ -14,6 +14,7 @@ export type NativeCodexReplayDescriptor = {
 } | {
     type: 'function_call';
     id?: string;
+    namespace?: string;
     block: number;
 };
 export interface NativeCodexReplayState {

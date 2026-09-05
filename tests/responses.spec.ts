@@ -138,6 +138,71 @@ describe('Responses request translation', () => {
     ))).toMatchObject({ code: 'INVALID_ARGS' })
   })
 
+  it('builds deterministic Astra Responses Lite prefixes and model controls', () => {
+    const generation = options({
+      model: 'gpt-6-astra',
+      system: 'DSH instructions',
+      sessionId: 'thread-key' as GenerateOptions['sessionId'],
+      reasoningEffort: ReasoningEffortId('high'),
+      tools: [{
+        name: 'lookup', description: 'safe lookup',
+        parameters: { type: 'object', properties: { key: { type: 'string' } } },
+      }],
+    })
+    const mode = { responsesLite: {
+      defaultVerbosity: 'low', instructionsTemplate: 'Astra base instructions',
+    } } as const
+    const first = codexRequestBody(generation, [{
+      role: 'user', content: [{ type: 'text', text: 'hello' }],
+    }], mode)
+    const second = codexRequestBody(generation, [{
+      role: 'user', content: [{ type: 'text', text: 'hello' }],
+    }], mode)
+
+    expect(second).toEqual(first)
+    expect(first).toEqual({
+      model: 'gpt-6-astra',
+      tool_choice: 'auto',
+      store: false,
+      stream: true,
+      include: ['reasoning.encrypted_content'],
+      prompt_cache_key: 'thread-key',
+      input: [
+        {
+          type: 'additional_tools',
+          id: expect.stringMatching(/^at_[0-9a-f-]{36}$/),
+          role: 'developer',
+          tools: [{
+            type: 'namespace', name: 'functions', description: '',
+            tools: [{
+              type: 'function', name: 'lookup', description: 'safe lookup',
+              parameters: { type: 'object', properties: { key: { type: 'string' } } },
+            }],
+          }],
+        },
+        {
+          type: 'message',
+          id: expect.stringMatching(/^msg_[0-9a-f-]{36}$/),
+          role: 'developer',
+          content: [{ type: 'input_text', text: 'Astra base instructions' }],
+          internal_chat_message_metadata_passthrough: {
+            content_item_kinds: ['model.base_instructions'],
+          },
+        },
+        {
+          type: 'message', role: 'developer',
+          content: [{ type: 'input_text', text: 'DSH instructions' }],
+        },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+      ],
+      parallel_tool_calls: false,
+      reasoning: { effort: 'high', summary: 'auto', context: 'all_turns' },
+      text: { verbosity: 'low' },
+    })
+    expect(first).not.toHaveProperty('instructions')
+    expect(first).not.toHaveProperty('tools')
+  })
+
   it.each([
     ['temperature', { temperature: 0 }],
     ['maxTokens', { maxTokens: 10 }],
@@ -205,6 +270,14 @@ describe('Responses usage and failures', () => {
 })
 
 describe('ResponsesStreamTranslator', () => {
+  it('safely ignores optional Guardian receipts when Guardian is not implemented', () => {
+    const translator = new ResponsesStreamTranslator()
+    expect(translator.push({
+      type: 'response.created',
+      response: { headers: { 'X-Codex-Guardian-Ticket': 'opaque-sensitive-ticket' } },
+    })).toEqual([])
+  })
+
   it('never exposes hidden reasoning text and exposes summary reasoning only', () => {
     const translator = new ResponsesStreamTranslator()
     expect(translator.push({

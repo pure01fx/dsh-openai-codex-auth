@@ -1,6 +1,10 @@
 {
   "models": [
     {
+      "guardian": {
+        "shell": "adaptive",
+        "file_changes": "synchronous"
+      },
       "slug": "gpt-test",
       "display_name": "gpt-test",
       "description": "desc",
@@ -17,11 +21,13 @@
       "supported_in_api": true,
       "priority": 1,
       "upgrade": null,
-      "support_verbosity": false,
-      "default_verbosity": null,
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "model_messages": { "instructions_template": "Astra catalog instructions" },
       "apply_patch_tool_type": null,
       "truncation_policy": { "mode": "bytes", "limit": 10000 },
       "supports_image_detail_original": false,
+      "use_responses_lite": true,
       "context_window": 272000,
       "experimental_supported_tools": []
     }

@@ -180,6 +180,76 @@ describe('NativeCodexWebSocketTransport', () => {
     transport.dispose()
   })
 
+  it('routes Astra through Lite metadata while preserving incremental WebSocket reuse', async () => {
+    const scripted = socket([
+      completed('resp_astra_warm'),
+      ...textResponse('resp_astra_one', 'msg_astra_one', 'ok'),
+      ...textResponse('resp_astra_two', 'msg_astra_two', 'done'),
+    ])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([scripted]),
+      fetch: vi.fn(async () => response()) as typeof fetch,
+    })
+    const mode = { responsesLite: {
+      defaultVerbosity: 'low', instructionsTemplate: 'Astra base instructions',
+    } } as const
+    const firstRequestAstra: GenerateOptions = {
+      ...firstRequest(), model: 'gpt-6-astra', system: 'Astra instructions',
+      tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }],
+    }
+    const first = await collect(transport.stream(firstRequestAstra, mode))
+    const assistant = createAssistantMessage({
+      content: [{ type: 'text', text: 'ok' }],
+      source: {
+        provider: NATIVE_CODEX_PROVIDER, model: 'gpt-6-astra', replayState: finishState(first),
+      },
+    })
+    await collect(transport.stream({
+      ...firstRequestAstra,
+      messages: [
+        firstRequestAstra.messages[0]!,
+        assistant,
+        createUserMessage({
+          content: [{ type: 'text', text: 'next' }], source: { kind: 'user' },
+        }),
+      ],
+    }, mode))
+
+    const [warmup, initial, incremental] = scripted.sent.map(text => JSON.parse(text))
+    const liteMetadata = {
+      ws_request_header_x_openai_internal_codex_responses_lite: 'true',
+    }
+    expect(warmup).toMatchObject({
+      type: 'response.create', model: 'gpt-6-astra', generate: false,
+      parallel_tool_calls: false,
+      reasoning: { summary: 'auto', context: 'all_turns' },
+      text: { verbosity: 'low' },
+      client_metadata: liteMetadata,
+      input: [
+        {
+          type: 'additional_tools', role: 'developer',
+          tools: [{ type: 'namespace', name: 'functions' }],
+        },
+        { type: 'message', role: 'developer' },
+        { type: 'message', role: 'developer' },
+        { type: 'message', role: 'user' },
+      ],
+    })
+    expect(warmup).not.toHaveProperty('instructions')
+    expect(warmup).not.toHaveProperty('tools')
+    expect(initial).toMatchObject({
+      type: 'response.create', previous_response_id: 'resp_astra_warm', input: [],
+      client_metadata: liteMetadata,
+    })
+    expect(incremental).toMatchObject({
+      type: 'response.create', previous_response_id: 'resp_astra_one',
+      client_metadata: liteMetadata,
+      input: [{ type: 'message', role: 'user' }],
+    })
+    transport.dispose()
+  })
+
   it('drops settled subagent reasoning and tool calls before WebSocket prewarm', async () => {
     const scripted = socket([
       completed('resp_warm_settlement'),
@@ -324,7 +394,10 @@ describe('NativeCodexWebSocketTransport', () => {
 
     expect(usage).toHaveBeenCalledWith({
       accountId: CREDENTIAL.accountId,
-      metadata: { amount: '0.12345678901234567890' },
+      metadata: {
+        amount: '0.12345678901234567890',
+        metadata: { input_tokens: 1, output_tokens: 1 },
+      },
     })
   })
 

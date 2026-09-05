@@ -132,6 +132,8 @@ export declare class OpenAICodexAuth extends Service {
     private usageError;
     private usageRefresh;
     private usageGeneration;
+    private accountUsageRequestGeneration;
+    private readonly accountUsageCredentialRefreshes;
     private directUsageSequence;
     private directUsageAccountId;
     private usageHasDirectDefault;
@@ -156,9 +158,9 @@ export declare class OpenAICodexAuth extends Service {
     private commitDocument;
     private upsertCurrentCredential;
     private commitCredential;
-    private resolveManagedCredentialLocked;
     /** Return the current managed bearer token, refreshing and migrating it when needed. */
     bearerToken(signal?: AbortSignal): Promise<string | undefined>;
+    private managedCredential;
     private externalNativeCredential;
     private resolveNativeCredential;
     private nativeRecoveryError;
@@ -173,8 +175,22 @@ export declare class OpenAICodexAuth extends Service {
     private cancelLogin;
     private resetCurrentAccountState;
     private setCurrentAccount;
+    private logoutAttempt;
     private logout;
     private status;
+    private accountRefreshJournalFilename;
+    private readAccountRefreshJournal;
+    private writeAccountRefreshJournal;
+    private clearAccountRefreshJournal;
+    private removeDeadFileLock;
+    private withAccountRefreshLock;
+    private withAccountRefreshLocks;
+    private reconcileAccountRefreshJournal;
+    private refreshManagedAccount;
+    private persistAccountUsageCredential;
+    private refreshAccountUsageCredential;
+    private accountUsageCredential;
+    private accountUsages;
     private fetchUsage;
     private write;
     private sendJson;
@@ -182,6 +198,7 @@ export declare class OpenAICodexAuth extends Service {
     private trustedManagementRequest;
     private requireCsrf;
     private handleStatus;
+    private handleAccountUsage;
     private handleDeviceStart;
     private handleBrowserStart;
     private handleBrowserPrepare;

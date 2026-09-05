@@ -78,6 +78,21 @@ function supportsFast(model: NativeCodexModel): boolean {
     || model.additionalSpeedTiers.includes('fast')
 }
 
+function responsesLiteMode(
+  model: NativeCodexModel | undefined, requestedModel = model?.slug,
+): Pick<NativeCodexTransportMode, 'responsesLite'> {
+  if (model !== undefined && !model.useResponsesLite) return {}
+  // Never downgrade the tracked Lite-only Astra slug to Standard Responses during catalog outages.
+  if (model === undefined && requestedModel !== 'gpt-6-astra') return {}
+  return {
+    responsesLite: {
+      defaultVerbosity: model?.defaultVerbosity ?? 'low',
+      ...model?.instructionsTemplate === undefined ? {}
+        : { instructionsTemplate: model.instructionsTemplate },
+    },
+  }
+}
+
 function fastRoutes(models: readonly NativeCodexModel[]): Map<string, NativeCodexModel> {
   const exact = new Set(models.map(model => model.slug))
   const routes = new Map<string, NativeCodexModel>()
@@ -108,9 +123,10 @@ function withWireReasoning(
   options: GenerateOptions,
   model?: NativeCodexModel,
 ): GenerateOptions {
-  const selected = options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort)
+  const explicit = options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort)
+  const selected = explicit ?? (model?.useResponsesLite ? model.defaultReasoningLevel : undefined)
   const wire = nativeCodexWireReasoningEffort(selected, model)
-  return wire === undefined || wire === selected
+  return wire === undefined || wire === explicit
     ? options
     : { ...options, reasoningEffort: ReasoningEffortId(wire) }
 }
@@ -163,6 +179,8 @@ function resolvedModel(
 /** Request-scoped native Codex transport owned by this package. */
 export interface NativeCodexTransportMode {
   serviceTier?: typeof CODEX_FAST_SERVICE_TIER
+  /** Enables the model-specific Responses Lite request and routing contract. */
+  responsesLite?: { defaultVerbosity?: string; instructionsTemplate?: string }
   publicModel?: string
   authorityHash?: string
   /** Turn-scoped sticky routing state captured from a provider response. */
@@ -285,7 +303,7 @@ export class NativeCodexAdapter extends LlmAdapter {
       this.assertNotAborted(options.signal)
       const exact = view.models.find(candidate => candidate.slug === options.model)
       if (exact !== undefined) {
-        yield* this.transport.stream(withWireReasoning(options, exact))
+        yield* this.transport.stream(withWireReasoning(options, exact), responsesLiteMode(exact))
         return
       }
       const fast = fastRoutes(view.models).get(options.model)
@@ -307,17 +325,16 @@ export class NativeCodexAdapter extends LlmAdapter {
           serviceTier: CODEX_FAST_SERVICE_TIER,
           publicModel: options.model,
           authorityHash: view.authorityHash,
+          ...responsesLiteMode(fast),
         },
       )
       return
     }
-    const selectedEffort = options.reasoningEffort === undefined
-      ? undefined : String(options.reasoningEffort)
-    const model = selectedEffort === 'ultra'
-      ? (await this.catalog?.list(options.signal) ?? [])
-        .find(candidate => candidate.slug === options.model)
-      : undefined
+    const model = (await this.catalog?.list(options.signal) ?? [])
+      .find(candidate => candidate.slug === options.model)
     this.assertNotAborted(options.signal)
-    yield* this.transport.stream(withWireReasoning(options, model))
+    yield* this.transport.stream(
+      withWireReasoning(options, model), responsesLiteMode(model, options.model),
+    )
   }
 }
