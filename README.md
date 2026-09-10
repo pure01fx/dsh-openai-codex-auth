@@ -17,7 +17,7 @@
 
 ## 快速开始
 
-当前 `0.7.x` 版本要求 DeepSeek Harness `0.1.1-rc.2`；仍运行 DSH `0.1.0-rc.6` 的 profile 应继续使用插件 `0.6.1`。
+当前 `0.10.0` 版本要求 DeepSeek Harness `0.1.1-rc.2`；仍运行 DSH `0.1.0-rc.6` 的 profile 应继续使用插件 `0.6.1`。
 
 将插件安装到 DSH 的 `web` profile：
 
@@ -47,6 +47,65 @@ dsh web
 4. 返回 DSH，在 **设置 → 模型提供方** 中选择 `openai-codex`。
 
 设备码登录无需 OAuth callback，适合本机、SSH 隧道和 HTTPS 反向代理场景。
+
+## 云端搜索和图片工具
+
+插件通过当前 Codex OAuth 账号提供以下普通 DSH 工具，支持 native 和 Code Mode。无需切换专用 preset；需要该 preset 已提供公开的 tools 服务。服务端是否开放能力仍取决于账号和模型。
+
+| 工具 | 用途 | 关键参数 |
+| --- | --- | --- |
+| `codex_web` | 网页/图片搜索、打开、点击、查找、PDF 截图、金融、天气、体育和时间 | `commands` 必填；`model/context/mode/search_context_size/user_location/filters/image_settings` 可选 |
+| `codex_image_generate` | 文生图，保存每张原图及预览附件 | `prompt` 必填；`model/quality/background/size/n` 可选 |
+| `codex_image_edit` | 编辑 1–5 张图片 | `prompt` 必填；`images` 或 `num_last_images_to_include` 二选一；其他参数同生成 |
+| `codex_image_inspect` | OCR、截图/图表解释及普通识图 | `prompt/images` 必填；`model/detail/reasoning_effort` 可选 |
+
+```yaml
+cloudTools:
+  enabled: true
+  search: true
+  imageGeneration: true
+  imageEditing: true
+  imageInspection: true
+  # searchModel: <你的 Codex 目录中的模型 ID>
+  # visionModel: <你的 Codex 目录中支持图片的模型 ID>
+  imageModel: gpt-image-2
+  searchMode: live           # cached | indexed | live
+  visionDetail: auto        # auto | low | high | original
+```
+
+搜索和识图依次选择显式 `model`、对应配置、当前 Codex 模型。使用 DeepSeek 等其他模型作为主模型时，需要明确配置 Codex 的 searchModel/visionModel；不会把主模型的名称发给 Codex。生成和编辑默认使用 gpt-image-2，与主模型无关。只需 OAuth/Provider 时可设置 `cloudTools.enabled: false`；缺失工具服务不会影响登录与文本模型。
+
+调用示例（Code Mode 的 `tools.*` 接口）：
+
+```ts
+const found = await tools.codex_web({
+  commands: { search_query: [{ q: 'OpenAI Codex documentation' }], response_length: 'short' },
+})
+console.log(found)
+// 后续 open/click/find 使用搜索结果中的 ref_id；也可以 open 一个 URL。
+
+const created = await tools.codex_image_generate({
+  prompt: 'A simple red circle on a white background', size: '1024x1024', n: 1,
+})
+console.log(created)
+// 下一次调用可指定原图 path，或 images:[{attachment_id:附件ID}]。
+const edited = await tools.codex_image_edit({
+  prompt: 'Change the circle to blue', num_last_images_to_include: 1,
+})
+console.log(edited)
+```
+
+搜索的 commands 支持 `search_query/image_query/open/click/find/screenshot/finance/weather/sports/time`，至少提供一个非空操作数组；response_length 不能单独调用。搜索默认只发送最近两条用户文本及其间最多 1000 UTF-8 字节的 assistant 文本（保守小于等于 token 上限），显式 context 可覆盖；不会发送系统提示、隐藏推理或工具私有上下文。引用按账号和会话隔离，切换账号后请重新搜索。结果保留正文、来源 URL、有界 opaque results 和引用；截断会明确注明。
+
+可识别的内联图片结果进入 DSH 附件。当前公开 web 服务只返回 HTML/文本，远程图片/PDF 截图 URL 会保留为链接并注明无法提取图片；不会把 OAuth 发往这些 URL。未知图片结构保留为有界结果，不能把链接展示当成图片已下载。主模型不支持图片时保留附件元数据与文字，不向该模型发送 image block。
+
+图片工具需要调用者的 fs、attachments 服务；生成/编辑的原图保存还需要执行文件权限的 shell 和 sandboxPolicy。原图写入调用者工作区的 `.dsh/codex-images/`，采用独占创建、0600 权限并返回可读路径。预览可能经过缩放、转码或 EXIF 旋转，原图与预览尺寸分别记录。附件 ID 必须来自当前可见会话或本次程序已返回的图片；绝对路径按调用者文件权限读取。编辑默认不是 multipart，不支持未声明的 mask/seed 字段。
+
+生成/编辑默认 quality、background、size 均为 auto，n 缺省不发送；一次最多返回 4 张图，输入最多 5 张，聚合图片字节有上限。服务拒绝、不确定网络失败或本地保存失败不会触发自动重复生成。401 仅允许同账号刷新后重试一次；不自动切换账号。
+
+识图是额外的一次无工具 Responses/Responses Lite 调用，返回文本、用量及实际发送图片尺寸。支持 original 的普通模型会保留原文件编码数据；不支持时降为 high，Lite 省略 detail。只提供缩放附件不能恢复原始像素。普通会话附图依旧直接发给主模型，不会隐式加一次识图调用。实时语音不在此实现范围内。
+
+详细源码依据、验证状态和限制见 [CODEX-COMPATIBILITY.md](./CODEX-COMPATIBILITY.md)。
 
 ## 多账号切换
 

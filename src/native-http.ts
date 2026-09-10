@@ -59,6 +59,8 @@ type ToolResultBlock = Extract<ContentBlock, { type: 'tool-result' }>
 
 export interface NativeCodexImageRead {
   data: Uint8Array
+  /** Internal per-image control used by the explicit vision tool. */
+  detail?: import('./responses.js').CodexImageDetail
 }
 
 export interface NativeCodexHttpOptions {
@@ -196,6 +198,7 @@ async function resolveImage(
     type: 'image',
     mediaType: block.attachment.mediaType,
     dataBase64: Buffer.from(stored.data).toString('base64'),
+    ...stored.detail === undefined ? {} : { detail: stored.detail },
   }
 }
 

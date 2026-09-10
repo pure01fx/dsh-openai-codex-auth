@@ -5,6 +5,7 @@ import { type IncomingMessage } from 'node:http';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
 import { CODEX_PROVIDER } from './native-adapter.js';
 export { CODEX_PROVIDER, NATIVE_CODEX_PROVIDER } from './native-adapter.js';
+import { type CloudToolsConfig } from './cloud-tools.js';
 export { normalizeUsage } from './usage.js';
 export { CODEX_CLIENT_VERSION, TRACKED_CODEX_COMMIT, TRACKED_CODEX_RELEASE, TRACKED_CODEX_REPOSITORY, } from './upstream.js';
 /** Persisted OAuth credential for one ChatGPT account. */
@@ -27,6 +28,8 @@ interface ParsedCredentialDocument {
 }
 /** Plugin configuration. */
 export interface Config {
+    /** Optional ordinary tools backed by the current Codex cloud account. */
+    cloudTools?: CloudToolsConfig;
     path?: string;
     dshHome?: string;
     nativeAdapter?: boolean;

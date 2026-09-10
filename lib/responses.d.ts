@@ -2,10 +2,12 @@ import { CallId, LlmError, type ContentBlock, type GenerateOptions, type StreamC
 import { type ParseSseOptions } from './sse.js';
 import { type NativeCodexReplaySource } from './replay.js';
 export declare const DEFAULT_CODEX_INSTRUCTIONS = "You are Codex, an AI coding agent. Help the user with software engineering tasks.";
+export type CodexImageDetail = 'auto' | 'low' | 'high' | 'original';
 export interface ResolvedImagePart {
     type: 'image';
     mediaType: string;
     dataBase64: string;
+    detail?: CodexImageDetail;
 }
 export interface ResolvedToolResultPart {
     type: 'tool-result';

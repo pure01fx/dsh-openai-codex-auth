@@ -38,6 +38,7 @@ export interface NativeCodexModel {
     instructionsTemplate?: string;
     contextWindow?: number;
     inputModalities: readonly string[];
+    supportsImageDetailOriginal?: boolean;
 }
 export interface NativeCodexCatalogView {
     models: readonly NativeCodexModel[];

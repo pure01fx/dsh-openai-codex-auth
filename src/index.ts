@@ -21,6 +21,9 @@ export { CODEX_PROVIDER, NATIVE_CODEX_PROVIDER } from './native-adapter.js'
 import { NativeCodexCatalog, type NativeCodexCredential } from './catalog.js'
 import { NativeCodexHttpTransport, type NativeCodexHttpOptions } from './native-http.js'
 import { NativeCodexWebSocketTransport } from './native-websocket.js'
+import { NativeCodexCloudClient } from './cloud-http.js'
+import { registerCodexImageTools, type CloudToolsConfig } from './cloud-tools.js'
+import { registerCodexWeb } from './cloud-web-tool.js'
 import type { CodexRateLimitUpdate } from './rate-limits.js'
 import type { CodexResponseUsageObservation } from './response-usage.js'
 import { mergeDirectUsage, normalizeUsage, type UsageSummary } from './usage.js'
@@ -100,6 +103,8 @@ interface AccountUsageResult {
 
 /** Plugin configuration. */
 export interface Config {
+  /** Optional ordinary tools backed by the current Codex cloud account. */
+  cloudTools?: CloudToolsConfig
   path?: string
   dshHome?: string
   nativeAdapter?: boolean
@@ -856,6 +861,17 @@ export class OpenAICodexAuth extends Service {
     nativeAdapter: z.boolean().default(true),
     nativeCompatibilityRoute: z.boolean().default(false),
     nativeWebSocket: z.boolean().default(true),
+    cloudTools: z.object({
+      enabled: z.boolean().default(true),
+      search: z.boolean().default(true),
+      imageGeneration: z.boolean().default(true),
+      imageEditing: z.boolean().default(true),
+      imageInspection: z.boolean().default(true),
+      searchModel: z.string(), visionModel: z.string(),
+      imageModel: z.string().default('gpt-image-2'),
+      searchMode: z.union([z.const('cached'), z.const('indexed'), z.const('live')]).default('live'),
+      visionDetail: z.union([z.const('auto'), z.const('low'), z.const('high'), z.const('original')]).default('auto'),
+    }),
   })
   static inject = ['credentials', 'webServer', 'webRuntime']
   private readonly filename: string
@@ -895,8 +911,7 @@ export class OpenAICodexAuth extends Service {
       nativeCompatibilityRoute: config.nativeCompatibilityRoute ?? false,
       nativeWebSocket: config.nativeWebSocket ?? true,
     }
-    if (this.routeConfig.nativeAdapter) {
-      const catalog = new NativeCodexCatalog({
+    const catalog = new NativeCodexCatalog({
         resolveCredential: signal => this.resolveNativeCredential(signal),
         warn: message => { ctx.logger.warn(message) },
       })
@@ -923,6 +938,7 @@ export class OpenAICodexAuth extends Service {
         },
         warn: message => { ctx.logger.warn(message) },
       }
+    if (this.routeConfig.nativeAdapter) {
       const transport = this.routeConfig.nativeWebSocket
         ? new NativeCodexWebSocketTransport(transportOptions)
         : new NativeCodexHttpTransport(transportOptions)
@@ -937,6 +953,14 @@ export class OpenAICodexAuth extends Service {
           ],
           new NativeCodexAdapter(catalog, transport),
         )
+      })
+    }
+    if (config.cloudTools?.enabled !== false) {
+      const cloudClient = new NativeCodexCloudClient(transportOptions)
+      ctx.inject(['tools'], toolCtx => {
+        const cloudConfig = config.cloudTools ?? {}
+        if (cloudConfig.search !== false) registerCodexWeb(toolCtx, { client: cloudClient, catalog, config: cloudConfig })
+        registerCodexImageTools(toolCtx, { client: cloudClient, catalog, transport: transportOptions, config: cloudConfig })
       })
     }
     ctx.effect(async () => {

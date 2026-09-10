@@ -29,7 +29,8 @@ function uuidV5(namespace: Uint8Array, name: string): string {
 
 function uuidBytes(value: string): Buffer { return Buffer.from(value.replaceAll('-', ''), 'hex') }
 
-export interface ResolvedImagePart { type: 'image'; mediaType: string; dataBase64: string }
+export type CodexImageDetail = 'auto' | 'low' | 'high' | 'original'
+export interface ResolvedImagePart { type: 'image'; mediaType: string; dataBase64: string; detail?: CodexImageDetail }
 export interface ResolvedToolResultPart {
   type: 'tool-result'
   toolCallId: CallId
@@ -51,7 +52,11 @@ function imageItem(image: ResolvedImagePart): Record<string, unknown> {
   if (!/^image[/][a-z0-9.+-]+$/i.test(image.mediaType) || image.dataBase64.length === 0) {
     throw fixedError('native Codex request contains invalid resolved image data', 'MALFORMED_REQUEST')
   }
-  return { type: 'input_image', image_url: `data:${image.mediaType};base64,${image.dataBase64}` }
+  if (image.detail !== undefined && !['auto', 'low', 'high', 'original'].includes(image.detail)) {
+    throw fixedError('native Codex image detail is invalid', 'MALFORMED_REQUEST')
+  }
+  return { type: 'input_image', image_url: `data:${image.mediaType};base64,${image.dataBase64}`,
+    ...image.detail === undefined ? {} : { detail: image.detail } }
 }
 
 function toolOutput(block: ResolvedToolResultPart): string | Record<string, unknown>[] {
@@ -213,6 +218,14 @@ export function codexRequestBody(
   const resolved = toResponsesInput(messages, options.system)
   const instructions = resolved.instructions ?? DEFAULT_CODEX_INSTRUCTIONS
   const input = normalizeCodexCallIds(resolved.input)
+  if (mode.responsesLite !== undefined) {
+    for (const item of input) {
+      const parts = item.type === 'function_call_output' ? item.output : item.content
+      if (Array.isArray(parts)) {
+        for (const part of parts) if (part.type === 'input_image') delete part.detail
+      }
+    }
+  }
   const common = {
     model: options.model,
     tool_choice: 'auto',

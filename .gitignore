@@ -13,6 +13,8 @@ lib/*
 !lib/index.d.ts
 !lib/catalog.js
 !lib/catalog.d.ts
+!lib/cloud-*.js
+!lib/cloud-*.d.ts
 !lib/endpoint.js
 !lib/endpoint.d.ts
 !lib/native-adapter.js

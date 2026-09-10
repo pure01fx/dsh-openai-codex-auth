@@ -119,6 +119,8 @@ describe('generated package artifacts', () => {
       ])
       const modules = [
         'catalog', 'endpoint', 'index', 'native-adapter', 'native-http',
+        'cloud-http', 'cloud-search', 'cloud-context', 'cloud-web-tool',
+        'cloud-images', 'cloud-media', 'cloud-vision', 'cloud-tools',
         'native-websocket', 'native-websocket-session', 'native-websocket-socket',
         'rate-limits', 'replay', 'response-usage', 'responses', 'sse', 'upstream', 'usage',
       ]

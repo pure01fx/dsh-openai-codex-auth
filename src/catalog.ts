@@ -55,6 +55,7 @@ export interface NativeCodexModel {
   instructionsTemplate?: string
   contextWindow?: number
   inputModalities: readonly string[]
+  supportsImageDetailOriginal?: boolean
 }
 
 export interface NativeCodexCatalogView {
@@ -265,6 +266,9 @@ function parseModel(value: unknown): NativeCodexModel {
       throw invalidCatalog('native Codex catalog contained an invalid context window')
     }
   }
+  if (row.supports_image_detail_original !== undefined && typeof row.supports_image_detail_original !== 'boolean') {
+    throw invalidCatalog('native Codex catalog contained invalid original image capability')
+  }
   const description = nonEmptyString(row.description)
   const defaultReasoningLevel = nonEmptyString(row.default_reasoning_level)
   const multiAgentReasoningEffort = nonEmptyString(row.multi_agent_reasoning_effort)
@@ -290,6 +294,8 @@ function parseModel(value: unknown): NativeCodexModel {
     ...instructionsTemplate === undefined ? {} : { instructionsTemplate },
     ...contextWindow === undefined ? {} : { contextWindow },
     inputModalities,
+    ...row.supports_image_detail_original === undefined ? {}
+      : { supportsImageDetailOriginal: row.supports_image_detail_original as boolean },
   }
 }
 

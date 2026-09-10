@@ -9,6 +9,7 @@ import { request as httpRequest } from 'node:http'
 import { createHash } from 'node:crypto'
 import OpenAICodexAuth, { internals, type OpenAICodexCredential } from '../src/index.ts'
 import { NativeCodexHttpTransport } from '../src/native-http.ts'
+import { ToolRuntime } from '@deepseek-ai/dsh-tools'
 
 const SUCCESS_SSE = await readFile(
   new URL('./fixtures/responses-text-usage.sse', import.meta.url),
@@ -177,6 +178,22 @@ async function disposeHarness(harness: Awaited<ReturnType<typeof createHarness>>
   await harness.fiber.dispose()
   await rm(harness.home, { recursive: true, force: true })
 }
+
+describe('optional cloud tool composition', () => {
+  it('registers with late tools on OAuth-only composition and disposes cleanly',async()=>{
+    const h=await createHarness()
+    try {
+      expect(h.root.openaiCodexAuth).toBeDefined()
+      h.root.provide('systemPrompt',{tools:()=>()=>{},section:()=>()=>{}} as never)
+      new ToolRuntime(h.root)
+      await new Promise<void>(resolve=>setImmediate(resolve))
+      const names=['codex_web','codex_image_generate','codex_image_edit','codex_image_inspect']
+      for(const name of names)expect(h.root.tools.get(name)).toBeDefined()
+      await h.fiber.dispose()
+      for(const name of names)expect(h.root.tools.get(name)).toBeUndefined()
+    } finally {await disposeHarness(h)}
+  })
+})
 
 describe('request trust and callback URL', () => {
   it('uses the exact callback registered for the public Codex CLI client', () => {

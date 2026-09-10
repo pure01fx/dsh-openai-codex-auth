@@ -9,6 +9,8 @@ type ImageBlock = Extract<ContentBlock, {
 }>;
 export interface NativeCodexImageRead {
     data: Uint8Array;
+    /** Internal per-image control used by the explicit vision tool. */
+    detail?: import('./responses.js').CodexImageDetail;
 }
 export interface NativeCodexHttpOptions {
     resolveCredential(signal?: AbortSignal): Promise<NativeCodexCredential>;

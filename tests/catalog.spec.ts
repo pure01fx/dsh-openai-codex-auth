@@ -66,6 +66,7 @@ describe('NativeCodexCatalog', () => {
         useResponsesLite: true,
         defaultVerbosity: 'low',
         instructionsTemplate: 'Astra catalog instructions',
+        supportsImageDetailOriginal: false,
         contextWindow: 272000,
         inputModalities: ['text', 'image'],
       },

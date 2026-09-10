@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.10.0
+
+### Codex cloud tools
+
+- Adds optional codex_web, codex_image_generate, codex_image_edit and codex_image_inspect tools using the current Codex OAuth account and public DSH services.
+- Adds account/session-bound search references and visible context, original image artifacts with normalized previews, bounded multi-image edits and explicit vision precision/usage. Nonvisual callers keep textual results and canonical attachment references.
+- Tracks cloud service request contracts at Codex b348fc26674189f758d5941cdab3f78f258b2aa7. Live account availability is tracked separately in CODEX-COMPATIBILITY.md; realtime voice is excluded.
+
 ## 0.9.0
 
 ### Codex 0.153 compatibility
