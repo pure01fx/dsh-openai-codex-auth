@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import {
-  CallId, ReasoningEffortId, type GenerateOptions, type StreamChunk,
+  ToolCallId, ReasoningEffortId, type GenerateOptions, type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -62,10 +62,10 @@ describe('Responses request translation', () => {
       { role: 'assistant', content: [
         { type: 'text', text: 'calling' },
         { type: 'reasoning', text: 'must not replay' },
-        { type: 'tool-call', id: CallId(longId), name: 'lookup', arguments: '{"key":"safe"}' },
+        { type: 'tool-call', id: ToolCallId(longId), name: 'lookup', arguments: '{"key":"safe"}' },
       ] },
       { role: 'user', content: [{
-        type: 'tool-result', toolCallId: CallId(longId), isError: false,
+        type: 'tool-result', toolCallId: ToolCallId(longId), isError: false,
         content: [
           { type: 'text', text: 'found' },
           { type: 'image', mediaType: 'image/jpeg', dataBase64: 'anBn' },

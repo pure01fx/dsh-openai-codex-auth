@@ -112,6 +112,9 @@ window.__ModuleLoader__.load({
           dispose: directory.dispose,
           wrappedLoad: undefined,
           wrappedDispose: undefined,
+          set: directory.store && directory.store.set,
+          wrappedSet: undefined,
+          visibleGroups: undefined,
           generation: 0,
           rawGroups: directory.store && typeof directory.store.getSnapshot === 'function'
             ? directory.store.getSnapshot().groups : [],
@@ -124,14 +127,29 @@ window.__ModuleLoader__.load({
             const groups = visibleModelGroups(rawGroups)
             return value && typeof value === 'object' ? { ...value, groups } : value
           }
-          record.rawGroups = rawGroups
+          if (rawGroups !== record.visibleGroups) record.rawGroups = rawGroups
           const groups = render(directory, record.rawGroups)
+          record.visibleGroups = groups
           return value && typeof value === 'object' ? { ...value, groups } : value
         }
         record.wrappedDispose = function (...args) {
           ++record.generation
           tracked.delete(directory)
+          if (directory.store.set === record.wrappedSet) directory.store.set = record.set
           return record.dispose.apply(this, args)
+        }
+        // Target ModelDirectory publishes catalog/selection/reconnect snapshots through set.
+        // Filter before publication so no subscriber can observe a hidden row.
+        if (typeof record.set === 'function') {
+          record.wrappedSet = function (state) {
+            if (state.groups !== record.visibleGroups) record.rawGroups = state.groups
+            const available = codexModels(record.rawGroups)
+            if (available.length > 0) writeAvailableModels(available)
+            const groups = visibleModelGroups(record.rawGroups)
+            record.visibleGroups = groups
+            return record.set.call(this, { ...state, groups })
+          }
+          directory.store.set = record.wrappedSet
         }
         directory.load = record.wrappedLoad
         directory.dispose = record.wrappedDispose
@@ -148,7 +166,9 @@ window.__ModuleLoader__.load({
         for (const directory of resolver.live.directories.values()) track(directory)
       }
       const refresh = () => {
-        for (const [directory, record] of tracked) render(directory, record.rawGroups)
+        for (const [directory, record] of tracked) {
+          record.visibleGroups = render(directory, record.rawGroups)
+        }
       }
       window.addEventListener(MODEL_VISIBILITY_EVENT, refresh)
 
@@ -159,6 +179,7 @@ window.__ModuleLoader__.load({
           ++record.generation
           if (directory.load === record.wrappedLoad) directory.load = record.load
           if (directory.dispose === record.wrappedDispose) directory.dispose = record.dispose
+          if (directory.store.set === record.wrappedSet) directory.store.set = record.set
         }
         tracked.clear()
       }

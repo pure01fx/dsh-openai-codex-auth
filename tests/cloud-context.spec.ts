@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
-import { CallId, createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { chooseCloudModel, recentSearchInput, visibleCloudImages } from '../src/cloud-context.ts'
 import type { NativeCodexModel } from '../src/catalog.ts'
 const model: NativeCodexModel = { slug: 'catalog-model', displayName: 'Model', inputModalities: ['text','image'], supportedReasoningLevels: [], additionalSpeedTiers: [], serviceTiers: [], visibility: 'list', supportedInApi: true, priority: 0 }
@@ -27,7 +27,7 @@ describe('cloud model selection',()=>{
 })
 describe('caller-visible cloud context',()=>{
   it('keeps only last two human texts and visible assistant text in order',()=>{
-    const messages=[user('old'),assistant('old answer'),user('first'),createUserMessage({source:{kind:'plugin',plugin:'private'},content:[{type:'text',text:'secret system'}]}),assistant('answer'),user('second'),createToolResultMessage({callId:CallId('hidden'),content:[{type:'text',text:'secret tool'}],isError:false})]
+    const messages=[user('old'),assistant('old answer'),user('first'),createUserMessage({source:{kind:'plugin',plugin:'private'},content:[{type:'text',text:'secret system'}]}),assistant('answer'),user('second'),createToolResultMessage({callId:ToolCallId('hidden'),content:[{type:'text',text:'secret tool'}],isError:false})]
     expect(recentSearchInput(messages)).toEqual([{role:'user',content:'first'},{role:'assistant',content:'answer'},{role:'user',content:'second'}])
     expect(recentSearchInput([assistant('no human')])).toEqual([])
   })
@@ -41,7 +41,7 @@ describe('caller-visible cloud context',()=>{
     expect(Buffer.byteLength(split.filter(x=>x.role==='assistant').map(x=>x.content).join(''))).toBeLessThanOrEqual(1000)
   })
   it('selects chronological user and correlated successful tool images only',()=>{
-    const call=CallId('call'),bad=CallId('bad')
+    const call=ToolCallId('call'),bad=ToolCallId('bad')
     const msgs=[createUserMessage({source:{kind:'user'},content:[image('upload')]}),createUserMessage({source:{kind:'plugin',plugin:'secret'},content:[image('private')]}),createAssistantMessage({source:{provider:'p',model:'m'},content:[image('assistant'),{type:'tool-call',id:call,name:'read_image',arguments:'{}'}]}),createToolResultMessage({callId:call,content:[image('tool')],isError:false}),createToolResultMessage({callId:bad,content:[image('orphan')],isError:false}),createToolResultMessage({callId:call,content:[image('failed')],isError:true}),createUserMessage({source:{kind:'user'},content:[image('new')]} )]
     expect(visibleCloudImages(msgs).map(x=>x.attachmentId)).toEqual(['upload','tool','new'])
   })

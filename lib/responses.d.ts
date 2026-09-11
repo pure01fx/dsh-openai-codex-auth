@@ -1,4 +1,4 @@
-import { CallId, LlmError, type ContentBlock, type GenerateOptions, type StreamChunk, type TokenUsage, type ToolSchema } from '@deepseek-ai/dsh-llm';
+import { ToolCallId, LlmError, type ContentBlock, type GenerateOptions, type StreamChunk, type TokenUsage, type ToolSchema } from '@deepseek-ai/dsh-llm';
 import { type ParseSseOptions } from './sse.js';
 import { type NativeCodexReplaySource } from './replay.js';
 export declare const DEFAULT_CODEX_INSTRUCTIONS = "You are Codex, an AI coding agent. Help the user with software engineering tasks.";
@@ -11,7 +11,7 @@ export interface ResolvedImagePart {
 }
 export interface ResolvedToolResultPart {
     type: 'tool-result';
-    toolCallId: CallId;
+    toolCallId: ToolCallId;
     content: readonly ResolvedContentPart[];
     isError?: boolean;
 }

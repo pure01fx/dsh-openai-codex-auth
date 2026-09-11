@@ -1,6 +1,12 @@
 # Codex 云端能力兼容性跟踪
 
-## 当前实现与验证边界
+## DSH 0.1.5-rc.1 版本适配
+
+`0.10.1` 迁移 ToolCallId、精确 SDK 依赖和客户端服务提供包，隐藏策略在目录发布投影之前执行。`tests/target-directory.spec.ts` 执行官方 shell 的真实 store/Zustand/Immer 与目标目录/catalog 类，使用合成 Remote 响应和投影输入；这不是浏览器联合验收。`tests/target-services.spec.ts` 使用真实 Cordis/LlmRuntime/ToolRuntime、真实 loopback HTTP/SSE/WebSocket，验证工具 ID、工具执行、含加密 reasoning 的历史回放、永久错误和取消，并确认 WS 没有偷偷回退 HTTP。实际 socket 测试也修复了 ws 成功回调为 null 时的误判。
+
+该版本不运行真实 OAuth、账号刷新或付费请求，不改写既有用户数据；旧版兼容性不在声明范围。下面的线上账号结果来自原 0.10.0 验证，不能视作本版本的新验证。升级/回滚建议见 README。
+
+## 原 0.10.0 实现与验证边界
 
 本次范围为已确认的非语音 Codex 云端服务。参考上游 b348fc26674189f758d5941cdab3f78f258b2aa7（cloud 专用跟踪常量在 src/upstream.ts）；原 Provider 协议基线仍单独保留。四个工具是普通 DSH function 工具，不依赖专用模式，不覆盖现有工具。
 

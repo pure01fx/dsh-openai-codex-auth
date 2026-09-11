@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
-import { BlockAssembler, CallId, type ContentBlock, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, ToolCallId, type ContentBlock, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   codexRequestBody,
   streamResponses,
@@ -102,7 +102,7 @@ describe('native Codex continuation replay', () => {
         role: 'assistant',
         content: [
           { type: 'reasoning', text: 'Checked safely.' },
-          { type: 'tool-call', id: CallId('call_redacted'), name: 'lookup', arguments: '{"key":"safe"}' },
+          { type: 'tool-call', id: ToolCallId('call_redacted'), name: 'lookup', arguments: '{"key":"safe"}' },
         ],
         replaySource: {
           provider: NATIVE_CODEX_PROVIDER,
@@ -113,7 +113,7 @@ describe('native Codex continuation replay', () => {
       {
         role: 'user',
         content: [{
-          type: 'tool-result', toolCallId: CallId('call_redacted'),
+          type: 'tool-result', toolCallId: ToolCallId('call_redacted'),
           content: [{ type: 'text', text: 'found' }],
         }],
       },
@@ -151,7 +151,7 @@ describe('native Codex continuation replay', () => {
       { type: 'function_call', id: 'fc_empty', namespace: 'functions', block: 0 },
     ])
     expect(replayAssistantInput([
-      { type: 'tool-call', id: CallId('call_empty'), name: 'lookup', arguments: '{}' },
+      { type: 'tool-call', id: ToolCallId('call_empty'), name: 'lookup', arguments: '{}' },
     ], {
       provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base', replayState: state,
     })).toEqual([
@@ -190,9 +190,9 @@ describe('native Codex continuation replay', () => {
     const content: ContentBlock[] = [
       { type: 'text', text: 'first' },
       { type: 'reasoning', text: 'summary' },
-      { type: 'tool-call', id: CallId('call_a'), name: 'a', arguments: '{}' },
+      { type: 'tool-call', id: ToolCallId('call_a'), name: 'a', arguments: '{}' },
       { type: 'text', text: 'second' },
-      { type: 'tool-call', id: CallId('call_b'), name: 'b', arguments: '{"b":1}' },
+      { type: 'tool-call', id: ToolCallId('call_b'), name: 'b', arguments: '{"b":1}' },
     ]
     const state = createNativeCodexReplayState(NATIVE_CODEX_PROVIDER, 'gpt-base', [
       { type: 'message', id: 'msg_first', blocks: [0] },
@@ -217,13 +217,13 @@ describe('native Codex continuation replay', () => {
     const input = codexRequestBody(options(), [
       {
         role: 'assistant',
-        content: [{ type: 'tool-call', id: CallId(longId), name: 'lookup', arguments: '{}' }],
+        content: [{ type: 'tool-call', id: ToolCallId(longId), name: 'lookup', arguments: '{}' }],
         replaySource: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base', replayState: state },
       },
       {
         role: 'user',
         content: [{
-          type: 'tool-result', toolCallId: CallId(longId),
+          type: 'tool-result', toolCallId: ToolCallId(longId),
           content: [{ type: 'text', text: 'ok' }],
         }],
       },

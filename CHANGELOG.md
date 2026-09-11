@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.10.1
+
+- Targets DSH 0.1.5-rc.1 with exact SDK peers and runtime helpers; migrates Responses tool calls to ToolCallId.
+- Keeps browser-local model hiding active during catalog, selection projection, and reconnection updates, filtering before subscribers receive snapshots.
+- Accepts the real Node/ws successful send callback (`null`), avoiding false WebSocket send failures and unintended HTTP fallback; replaces the local ws declaration with official types and handles bounded RawData variants.
+- Adds actual target directory and LLM/tools service protocol regression coverage. Older DSH releases are not claimed by this candidate.
+
 ## 0.10.0
 
 ### Codex cloud tools

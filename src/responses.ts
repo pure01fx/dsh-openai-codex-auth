@@ -1,7 +1,7 @@
 /** Pure DSH-to-Codex Responses request and stream translation. */
 import { createHash } from 'node:crypto'
 import {
-  CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE,
+  ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE,
   isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE,
   type ContentBlock, type GenerateOptions, type StreamChunk, type TokenUsage, type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
@@ -33,7 +33,7 @@ export type CodexImageDetail = 'auto' | 'low' | 'high' | 'original'
 export interface ResolvedImagePart { type: 'image'; mediaType: string; dataBase64: string; detail?: CodexImageDetail }
 export interface ResolvedToolResultPart {
   type: 'tool-result'
-  toolCallId: CallId
+  toolCallId: ToolCallId
   content: readonly ResolvedContentPart[]
   isError?: boolean
 }
@@ -385,7 +385,7 @@ interface OpenBlock {
 function closeBlock(block: OpenBlock): ContentBlock {
   if (block.kind === 'text') return { type: 'text', text: block.text }
   if (block.kind === 'reasoning') return { type: 'reasoning', text: block.text }
-  return { type: 'tool-call', id: CallId(block.callId), name: block.name ?? '', arguments: block.text }
+  return { type: 'tool-call', id: ToolCallId(block.callId), name: block.name ?? '', arguments: block.text }
 }
 
 export interface ResponsesReplayContext { provider: string; model: string }
@@ -470,7 +470,7 @@ export class ResponsesStreamTranslator {
         this.sawToolCall = true
         const block = this.open(`${item.id}:call`, 'tool-call', chunks, item.call_id, item.name)
         chunks.push({
-          type: 'tool-call-delta', index: block.index, id: CallId(block.callId),
+          type: 'tool-call-delta', index: block.index, id: ToolCallId(block.callId),
           name: item.name, argumentsDelta: '',
         })
         return chunks
@@ -502,7 +502,7 @@ export class ResponsesStreamTranslator {
         const delta = eventDelta(event)
         this.append(block, delta)
         chunks.push({
-          type: 'tool-call-delta', index: block.index, id: CallId(block.callId),
+          type: 'tool-call-delta', index: block.index, id: ToolCallId(block.callId),
           ...block.name === undefined ? {} : { name: block.name }, argumentsDelta: delta,
         })
         return chunks

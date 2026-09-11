@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { CallId, createUserMessage, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { registerCodexImageTools } from '../src/cloud-tools.ts'
 import { NativeCodexCloudClient } from '../src/cloud-http.ts'
 import { nativeCodexAuthorityHash } from '../src/catalog.ts'
@@ -54,7 +54,7 @@ async function harness(options:{services?:boolean;config?:any}={}){
   cleanup.push(()=>scope.dispose())
   let call=0
   async function execute(name:string,args:any){
-    const id=CallId('call-'+ ++call)
+    const id=ToolCallId('call-'+ ++call)
     history.push(createAssistantMessage({source:{provider:'openai-codex',model:'gpt-test'},content:[{type:'tool-call',name,id,arguments:JSON.stringify(args)}]}))
     const result=await ctx.tools.execute({name,arguments:args,callId:id,agent,signal:new AbortController().signal})
     if(!result.isError)history.push(createToolResultMessage({callId:id,content:result.content,isError:false}))
@@ -84,7 +84,7 @@ describe('registered image tools',()=>{
   })
   it('reuses successful same-program images before history is materialized',async()=>{
     const h=await harness()
-    const call=(name:string,args:any,id:string)=>h.ctx.tools.execute({name,arguments:args,callId:CallId(id),agent:h.agent,signal:new AbortController().signal})
+    const call=(name:string,args:any,id:string)=>h.ctx.tools.execute({name,arguments:args,callId:ToolCallId(id),agent:h.agent,signal:new AbortController().signal})
     const first=await call('codex_image_generate',{prompt:'red'},'same-1')
     expect(first.isError,JSON.stringify(first)).toBe(false)
     expect(h.history).toHaveLength(0)
@@ -119,7 +119,7 @@ describe('registered image tools',()=>{
     const h=await harness()
     expect((await h.execute('codex_image_edit',{prompt:'x',images:[{attachment_id:'foreign'}]})).isError).toBe(true)
     expect((await h.execute('codex_image_edit',{prompt:'x',images:[{path:'/x'}],num_last_images_to_include:1})).isError).toBe(true)
-    expect((await h.ctx.tools.execute({name:'codex_image_inspect',arguments:{prompt:'x',images:[{path:'/x'}]},callId:CallId('no-agent'),signal:new AbortController().signal})).isError).toBe(true)
+    expect((await h.ctx.tools.execute({name:'codex_image_inspect',arguments:{prompt:'x',images:[{path:'/x'}]},callId:ToolCallId('no-agent'),signal:new AbortController().signal})).isError).toBe(true)
     expect(h.posts).toEqual([])
   })
 })

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
-import { CallId, createAssistantMessage, createToolResultMessage, createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createAssistantMessage, createToolResultMessage, createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
 import { ToolRuntime, renderToolsSdk } from '@deepseek-ai/dsh-tools'
 import { nativeCodexAuthorityHash, type NativeCodexModel } from '../src/catalog.ts'
 import { NativeCodexCloudClient } from '../src/cloud-http.ts'
@@ -22,7 +22,7 @@ function setup(options: { account?:string; response?:unknown; messages?:Message[
   const session={id:'session-id',header:{cwd:'/caller/workspace'},deriveMessages:()=>messages}
   const agent={id:session.id,session,ctx:callerCtx,options:{provider:'openai-codex',model:model.slug+'-fast'}} as any
   let calls=0
-  const execute=(args:any={commands:{search_query:[{q:'test'}]}},signal=new AbortController().signal,caller:any=agent)=>ctx.tools.execute({callId:CallId('call-'+(++calls)),name:'codex_web',arguments:args,agent:caller,signal})
+  const execute=(args:any={commands:{search_query:[{q:'test'}]}},signal=new AbortController().signal,caller:any=agent)=>ctx.tools.execute({callId:ToolCallId('call-'+(++calls)),name:'codex_web',arguments:args,agent:caller,signal})
   return {ctx,callerCtx,client,catalog,sent,agent,messages,execute,setAccount:(value:string)=>{account=value}}
 }
 const ok=(result:any)=>{expect(result.isError,JSON.stringify(result)).toBe(false);return result.value as any}
@@ -67,7 +67,7 @@ describe('codex_web public ToolRuntime integration',()=>{
     const first=await f.execute(); const value=ok(first)
     ok(await f.execute({commands:{open:[{ref_id:'ref_search_1'}]}}))
     expect(f.sent[0]!.body.id).toBe(f.sent[1]!.body.id)
-    const history=[createAssistantMessage({source:{provider:'p',model:'m'},content:[{type:'tool-call',id:CallId('saved'),name:'codex_web',arguments:'{}'}]}),createToolResultMessage({callId:CallId('saved'),content:first.content,isError:false})]
+    const history=[createAssistantMessage({source:{provider:'p',model:'m'},content:[{type:'tool-call',id:ToolCallId('saved'),name:'codex_web',arguments:'{}'}]}),createToolResultMessage({callId:ToolCallId('saved'),content:first.content,isError:false})]
     const restored=setup({messages:history})
     ok(await restored.execute({commands:{open:[{ref_id:'ref_search_1'}]}}))
     expect(restored.sent[0]!.body.id).toBe(f.sent[0]!.body.id)
