@@ -1,4 +1,4 @@
-/** Bounded Node WebSocket client seam with injectable deterministic factories. */
+/** Node WebSocket client seam with injectable deterministic factories. */
 import { LlmError, ProviderRequestId } from '@deepseek-ai/dsh-llm'
 import type { IncomingHttpHeaders } from 'node:http'
 import { HttpsProxyAgent } from 'https-proxy-agent'
@@ -11,8 +11,6 @@ import {
 import WebSocket from 'ws'
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
-const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024
-const MAX_QUEUED_BYTES = 64 * 1024 * 1024
 
 export type NativeCodexWebSocketFrame =
   | { type: 'text'; text: string }
@@ -22,6 +20,8 @@ export interface NativeCodexWebSocket {
   readonly responseHeaders: Readonly<Record<string, string>>
   send(text: string, signal?: AbortSignal): Promise<void>
   receive(signal?: AbortSignal): Promise<NativeCodexWebSocketFrame>
+  /** Observe incoming payload bytes while a logical inference owns the socket. */
+  observeActivity?(observer: (bytes: number) => void): () => void
   close(): void
 }
 
@@ -30,7 +30,6 @@ export interface NativeCodexWebSocketConnectOptions {
   headers: Record<string, string>
   signal?: AbortSignal
   connectTimeoutMs?: number
-  maxFrameBytes?: number
 }
 
 export interface NativeCodexWebSocketFactory {
@@ -85,36 +84,34 @@ export function nativeCodexWebSocketUrl(endpoint: string): string {
 }
 
 class NodeNativeCodexWebSocket implements NativeCodexWebSocket {
-  private readonly queue: Array<{
-    value: NativeCodexWebSocketFrame | LlmError
-    bytes: number
-  }> = []
-  private queuedBytes = 0
+  private readonly queue: Array<NativeCodexWebSocketFrame | LlmError> = []
   private readonly waiters: Array<{
     resolve: (frame: NativeCodexWebSocketFrame) => void
     reject: (error: unknown) => void
   }> = []
   private ended = false
+  private activityObserver: ((bytes: number) => void) | undefined
+
+  observeActivity(observer: (bytes: number) => void): () => void {
+    this.activityObserver = observer
+    return () => { if (this.activityObserver === observer) this.activityObserver = undefined }
+  }
 
   constructor(
     private readonly socket: WebSocket,
     readonly responseHeaders: Readonly<Record<string, string>>,
-    private readonly maxFrameBytes: number,
   ) {
+    socket.on('ping', data => { this.activityObserver?.(data.byteLength) })
+    socket.on('pong', data => { this.activityObserver?.(data.byteLength) })
     socket.on('message', (data, isBinary) => {
+      this.activityObserver?.(Array.isArray(data) ? data.reduce((sum, part) => sum + part.byteLength, 0) : data.byteLength)
       if (isBinary) {
         this.fail(failure('native Codex WebSocket returned a binary frame', 'WS_PROTOCOL_ERROR'))
         return
       }
-      const bytes = Array.isArray(data)
-        ? data.reduce((total, chunk) => total + chunk.byteLength, 0) : data.byteLength
-      if (bytes > maxFrameBytes) {
-        this.fail(failure('native Codex WebSocket frame exceeded the size limit', 'WS_FRAME_TOO_LARGE'))
-        return
-      }
-      const buffer = Array.isArray(data) ? Buffer.concat(data, bytes)
+      const buffer = Array.isArray(data) ? Buffer.concat(data)
         : Buffer.isBuffer(data) ? data : Buffer.from(data)
-      this.push({ type: 'text', text: buffer.toString('utf8') }, bytes)
+      this.push({ type: 'text', text: buffer.toString('utf8') })
     })
     socket.on('close', (code, reason) => {
       this.ended = true
@@ -125,19 +122,14 @@ class NodeNativeCodexWebSocket implements NativeCodexWebSocket {
     })
   }
 
-  private push(value: NativeCodexWebSocketFrame | LlmError, bytes = 0): void {
+  private push(value: NativeCodexWebSocketFrame | LlmError): void {
     const waiter = this.waiters.shift()
     if (waiter !== undefined) {
       if (value instanceof LlmError) waiter.reject(value)
       else waiter.resolve(value)
       return
     }
-    if (this.queuedBytes + bytes > MAX_QUEUED_BYTES) {
-      this.fail(failure('native Codex WebSocket queued too much response data', 'WS_RESPONSE_TOO_LARGE'))
-      return
-    }
-    this.queue.push({ value, bytes })
-    this.queuedBytes += bytes
+    this.queue.push(value)
   }
 
   private fail(error: LlmError): void {
@@ -146,8 +138,7 @@ class NodeNativeCodexWebSocket implements NativeCodexWebSocket {
     const waiters = this.waiters.splice(0)
     for (const waiter of waiters) waiter.reject(error)
     this.queue.length = 0
-    this.queuedBytes = 0
-    if (waiters.length === 0) this.queue.push({ value: error, bytes: 0 })
+    if (waiters.length === 0) this.queue.push(error)
   }
 
   async send(text: string, signal?: AbortSignal): Promise<void> {
@@ -173,9 +164,8 @@ class NodeNativeCodexWebSocket implements NativeCodexWebSocket {
     if (signal?.aborted) throw abortFailure(signal)
     const queued = this.queue.shift()
     if (queued !== undefined) {
-      this.queuedBytes -= queued.bytes
-      if (queued.value instanceof LlmError) throw queued.value
-      return queued.value
+      if (queued instanceof LlmError) throw queued
+      return queued
     }
     return new Promise((resolve, reject) => {
       let waiter!: (typeof this.waiters)[number]
@@ -204,7 +194,6 @@ class NodeNativeCodexWebSocket implements NativeCodexWebSocket {
 export class NodeNativeCodexWebSocketFactory implements NativeCodexWebSocketFactory {
   async connect(options: NativeCodexWebSocketConnectOptions): Promise<NativeCodexWebSocket> {
     const timeout = positive(options.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS, 'connect timeout')
-    const maximum = positive(options.maxFrameBytes, DEFAULT_MAX_FRAME_BYTES, 'frame limit')
     if (options.signal?.aborted) throw abortFailure(options.signal)
     return new Promise((resolve, reject) => {
       const responseHeaders: Record<string, string> = {}
@@ -214,7 +203,8 @@ export class NodeNativeCodexWebSocketFactory implements NativeCodexWebSocketFact
         headers: options.headers,
         ...(agent === undefined ? {} : { agent }),
         handshakeTimeout: timeout,
-        maxPayload: maximum,
+        // ws uses zero to disable its default message-size ceiling.
+        maxPayload: 0,
         perMessageDeflate: true,
       })
       const abort = (): void => {
@@ -247,7 +237,7 @@ export class NodeNativeCodexWebSocketFactory implements NativeCodexWebSocketFact
       })
       socket.on('open', () => {
         options.signal?.removeEventListener('abort', abort)
-        resolve(new NodeNativeCodexWebSocket(socket, responseHeaders, maximum))
+        resolve(new NodeNativeCodexWebSocket(socket, responseHeaders))
       })
       socket.on('error', (error) => {
         options.signal?.removeEventListener('abort', abort)

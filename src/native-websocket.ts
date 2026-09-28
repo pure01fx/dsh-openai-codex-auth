@@ -1,5 +1,6 @@
 /** WebSocket v2 Responses transport with bounded session state and sticky HTTP fallback. */
 import { createHash } from 'node:crypto'
+import { networkTelemetry, trackNetwork, observeNetworkOutput, type NetworkRequestHandle } from './network-telemetry.js'
 import {
   LlmError,
   ProviderRequestId,
@@ -32,6 +33,7 @@ import {
 } from './rate-limits.js'
 import {
   ResponsesStreamTranslator,
+  responsesFailure,
   codexResponseTurnState,
   type ResponsesStreamEvent,
 } from './responses.js'
@@ -44,7 +46,6 @@ import { NativeCodexWebSocketSessionState } from './native-websocket-session.js'
 
 const WS_BETA = 'responses_websockets=2026-02-06'
 const DEFAULT_IDLE_TIMEOUT_MS = 300_000
-const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024
 const DEFAULT_MAX_SESSIONS = 32
 const DEFAULT_SESSION_IDLE_MS = 30 * 60_000
 const DEFAULT_MAX_RECONNECTS = 5
@@ -53,13 +54,11 @@ const DEFAULT_MAX_RETRY_DELAY_MS = 10_000
 const INITIAL_CONNECTION_RETRY_DELAY_MS = 5_000
 const MAX_CONNECTION_RETRY_DELAY_MS = 60_000
 const MAX_TURN_STATE_BYTES = 4096
-const MAX_RETAINED_OUTPUT_BYTES = 64 * 1024 * 1024
 
 export interface NativeCodexWebSocketTransportOptions extends NativeCodexHttpOptions {
   webSocketFactory?: NativeCodexWebSocketFactory
   webSocketConnectTimeoutMs?: number
   webSocketIdleTimeoutMs?: number
-  maxWebSocketFrameBytes?: number
   maxWebSocketSessions?: number
   webSocketSessionIdleMs?: number
   maxWebSocketReconnects?: number
@@ -86,7 +85,7 @@ function failure(message: string, code: string, cause?: unknown): LlmError {
 function reconnectable(code: string): boolean {
   return [
     'WS_RETRYABLE', 'WS_RETRYABLE_RESET', 'WS_PROTOCOL_ERROR',
-    'WS_FRAME_TOO_LARGE', 'WS_RESPONSE_TOO_LARGE', 'TIMEOUT',
+    'TIMEOUT',
     NATIVE_CODEX_CONNECTION_FAILED_CODE,
   ].includes(code)
 }
@@ -268,8 +267,16 @@ function eventFailure(event: Record<string, unknown>): LlmError | undefined {
     return new LlmError('native Codex WebSocket authentication failed', 'WS_AUTH', facts)
   }
   if (status === 403) return new LlmError('native Codex WebSocket authorization failed', 'AUTH', facts)
-  if (providerCode === 'rate_limit_exceeded' || providerCode === 'usage_limit_reached'
-    || status === 429) {
+  const classified = responsesFailure(providerCode,
+    typeof error.message === 'string' ? error.message : undefined)
+  if (classified.code !== 'SERVER') {
+    const delay = facts?.providerRetryAfterMs ?? classified.failure.providerRetryAfterMs
+    return new LlmError(classified.message, classified.code === 'RATE_LIMIT' ? 'RATE_LIMITED' : classified.code, {
+      ...facts,
+      ...(delay === undefined ? {} : { providerRetryAfterMs: Math.min(delay, 120_000) }),
+    })
+  }
+  if (providerCode === 'usage_limit_reached' || status === 429) {
     return new LlmError('native Codex WebSocket rate limit was reached', 'RATE_LIMITED', facts)
   }
   if (status !== undefined && status >= 500) {
@@ -285,7 +292,6 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
   private readonly sessions = new Map<string, SessionEntry>()
   private readonly connectTimeoutMs: number
   private readonly idleTimeoutMs: number
-  private readonly maxFrameBytes: number
   private readonly maxSessions: number
   private readonly sessionIdleMs: number
   private readonly maxReconnects: number
@@ -303,10 +309,6 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
     )
     this.idleTimeoutMs = boundedPositive(
       options.webSocketIdleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS, 60 * 60_000, 'WebSocket idle timeout',
-    )
-    this.maxFrameBytes = boundedPositive(
-      options.maxWebSocketFrameBytes, DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_FRAME_BYTES,
-      'WebSocket frame limit',
     )
     this.maxSessions = boundedPositive(
       options.maxWebSocketSessions, DEFAULT_MAX_SESSIONS, 256, 'WebSocket session limit',
@@ -337,12 +339,14 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
     return Math.max(1, Math.round(exponential * jitter))
   }
 
-  private async wait(retry: number, error: LlmError, signal: AbortSignal): Promise<void> {
+  private async wait(retry: number, error: LlmError, signal: AbortSignal, telemetry: NetworkRequestHandle): Promise<void> {
     const delay = this.retryDelay(retry, error)
+    telemetry.retry(delay)
     await (this.options.sleep ?? sleep)(delay, signal)
   }
 
-  private async waitForConnection(delayMs: number, signal: AbortSignal): Promise<void> {
+  private async waitForConnection(delayMs: number, signal: AbortSignal, telemetry: NetworkRequestHandle): Promise<void> {
+    telemetry.retry(delayMs, 'connection')
     this.options.warn?.(`native Codex network is unavailable; reconnecting in ${delayMs}ms`)
     await (this.options.sleep ?? sleep)(delayMs, signal)
   }
@@ -433,6 +437,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
     prepared: NativeCodexPreparedRequest,
     credential: NativeCodexCredential,
     signal: AbortSignal,
+    telemetry: NetworkRequestHandle,
   ): Promise<void> {
     const fingerprint = socketCredential(credential)
     if (entry.socket !== undefined && entry.socketCredential === fingerprint) return
@@ -442,12 +447,12 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
       headers: this.headers(prepared, credential),
       signal,
       connectTimeoutMs: this.connectTimeoutMs,
-      maxFrameBytes: this.maxFrameBytes,
     })
     if (this.disposed) {
       socket.close()
       throw failure('native Codex WebSocket transport was disposed', 'DISPOSED')
     }
+    telemetry.activity()
     entry.socket = socket
     entry.socketCredential = fingerprint
     publishCodexRateLimits(
@@ -493,21 +498,20 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
     accountId: string,
     prewarm: boolean,
     signal: AbortSignal,
+    telemetry: NetworkRequestHandle,
   ): AsyncIterable<StreamChunk> {
     if (entry.socket === undefined) throw failure('native Codex WebSocket is unavailable', 'WS_RETRYABLE')
     const encoded = JSON.stringify(payload)
-    if (Buffer.byteLength(encoded) > 24 * 1024 * 1024) {
-      throw failure('native Codex WebSocket request exceeded the size limit', 'REQUEST_TOO_LARGE')
-    }
     await entry.socket.send(encoded, signal)
+    telemetry.state('waiting')
     const translator = new ResponsesStreamTranslator(prewarm ? undefined : {
       provider: generation.provider,
       model: mode.publicModel ?? generation.model,
     })
     const outputItems: Record<string, unknown>[] = []
-    let outputBytes = 0
     while (true) {
       const text = await this.receive(entry, signal)
+      if (entry.socket?.observeActivity === undefined) telemetry.activity(Buffer.byteLength(text))
       let event: ResponsesStreamEvent
       try { event = JSON.parse(text) as ResponsesStreamEvent } catch {
         this.options.warn?.('native Codex ignored a malformed WebSocket event')
@@ -547,14 +551,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
         if (nextTurnState !== undefined) entry.turnState = nextTurnState
       }
       const output = normalizedOutputItem(event)
-      if (output !== undefined) {
-        const nextOutputBytes = outputBytes + Buffer.byteLength(JSON.stringify(output))
-        if (nextOutputBytes > MAX_RETAINED_OUTPUT_BYTES) {
-          throw failure('native Codex WebSocket retained output exceeded the size limit', 'WS_RESPONSE_TOO_LARGE')
-        }
-        outputItems.push(output)
-        outputBytes = nextOutputBytes
-      }
+      if (output !== undefined) outputItems.push(output)
       if (event.type === 'response.completed') {
         const response = typeof (event as unknown as Record<string, unknown>).response === 'object'
             && (event as unknown as Record<string, unknown>).response !== null
@@ -577,37 +574,51 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
     prepared: NativeCodexPreparedRequest,
     credential: NativeCodexCredential,
     signal: AbortSignal,
+    telemetry: NetworkRequestHandle,
   ): AsyncIterable<StreamChunk> {
-    await this.ensureSocket(entry, prepared, credential, signal)
-    let justPrewarmed = false
-    if (!entry.prewarmAttempted) {
-      entry.prewarmAttempted = true
-      const warm = entry.protocol.prewarm(withRequestMetadata(
-        prepared.request, entry.turnState, prepared.mode.responsesLite !== undefined,
-      ))
-      for await (const _chunk of this.exchange(
-        entry, warm.payload, prepared.generation, prepared.mode, credential.accountId, true, signal,
-      )) { /* prewarm is invisible */ }
-      entry.prewarmSucceeded = true
-      justPrewarmed = true
-    }
-    const plan = entry.protocol.plan(
-      withRequestMetadata(
-        prepared.request, entry.turnState, prepared.mode.responsesLite !== undefined,
-      ), justPrewarmed,
-    )
-    yield* this.exchange(
-      entry, plan.payload, prepared.generation, prepared.mode, credential.accountId, false, signal,
-    )
-    if (this.options.onCompleted !== undefined) {
-      try { this.options.onCompleted() } catch {
-        this.options.warn?.('native Codex usage refresh could not be scheduled')
+    telemetry.attempt('websocket')
+    await this.ensureSocket(entry, prepared, credential, signal, telemetry)
+    const stopActivity = entry.socket?.observeActivity?.(bytes => telemetry.activity(bytes))
+    try {
+      let justPrewarmed = false
+      if (!entry.prewarmAttempted) {
+        entry.prewarmAttempted = true
+        const warm = entry.protocol.prewarm(withRequestMetadata(
+          prepared.request, entry.turnState, prepared.mode.responsesLite !== undefined,
+        ))
+        for await (const _chunk of this.exchange(
+          entry, warm.payload, prepared.generation, prepared.mode, credential.accountId, true, signal, telemetry,
+        )) { /* prewarm is invisible */ }
+        entry.prewarmSucceeded = true
+        justPrewarmed = true
       }
+      const plan = entry.protocol.plan(
+        withRequestMetadata(
+          prepared.request, entry.turnState, prepared.mode.responsesLite !== undefined,
+        ), justPrewarmed,
+      )
+      yield* this.exchange(
+        entry, plan.payload, prepared.generation, prepared.mode, credential.accountId, false, signal, telemetry,
+      )
+      if (this.options.onCompleted !== undefined) {
+        try { this.options.onCompleted() } catch {
+          this.options.warn?.('native Codex usage refresh could not be scheduled')
+        }
+      }
+    } finally {
+      stopActivity?.()
     }
   }
 
   async *stream(
     generation: GenerateOptions, mode: NativeCodexTransportMode = {},
+  ): AsyncIterable<StreamChunk> {
+    yield* trackNetwork(this.options.telemetry ?? networkTelemetry, 'websocket', generation.signal,
+      handle => this.streamTracked(generation, mode, handle))
+  }
+
+  private async *streamTracked(
+    generation: GenerateOptions, mode: NativeCodexTransportMode, telemetry: NetworkRequestHandle,
   ): AsyncIterable<StreamChunk> {
     if (this.disposed) throw failure('native Codex WebSocket transport was disposed', 'DISPOSED')
     const lifecycle = new AbortController()
@@ -650,7 +661,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
     let requestCompleted = false
     try {
       if (entry.disabled) {
-        yield* this.http.stream(activeGeneration, fallbackMode())
+        yield* this.http.stream(activeGeneration, fallbackMode(), telemetry)
         requestCompleted = true
         return
       }
@@ -659,6 +670,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
         let attemptedCredential: NativeCodexCredential | undefined
         const enteringPrewarm = !entry.prewarmAttempted
         try {
+          telemetry.state('preparing')
           const credential = await this.options.resolveCredential(signal)
           attemptedCredential = credential
           if (pinnedAccountId === undefined) pinnedAccountId = credential.accountId
@@ -666,8 +678,9 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
             throw failure('native Codex account changed during request', 'AUTH')
           }
           this.assertFastAuthority(credential, mode)
-          for await (const chunk of this.attempt(entry, prepared, credential, signal)) {
+          for await (const chunk of this.attempt(entry, prepared, credential, signal, telemetry)) {
             emitted = true
+            observeNetworkOutput(telemetry, chunk)
             yield chunk
           }
           requestCompleted = true
@@ -688,7 +701,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
           // the DSH turn in an invisible infinite reconnect loop.
           if (attemptedCredential === undefined
             && isNativeCodexConnectionFailure(failureValue)) {
-            await this.waitForConnection(connectionRetryDelayMs, signal)
+            await this.waitForConnection(connectionRetryDelayMs, signal, telemetry)
             connectionRetryDelayMs = Math.min(
               connectionRetryDelayMs * 2, MAX_CONNECTION_RETRY_DELAY_MS,
             )
@@ -701,7 +714,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
             try {
               const changed = await this.options.recoverCredential(attemptedCredential, signal)
               recovered = true
-              if (changed) continue
+              if (changed) { telemetry.retry(0); continue }
               throw failure('native Codex rejected the configured credential', 'AUTH')
             } catch (recoveryError) {
               if (this.disposed) {
@@ -709,7 +722,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
               }
               if (generation.signal?.aborted) throw recoveryError
               if (isNativeCodexConnectionFailure(recoveryError)) {
-                await this.waitForConnection(connectionRetryDelayMs, signal)
+                await this.waitForConnection(connectionRetryDelayMs, signal, telemetry)
                 connectionRetryDelayMs = Math.min(
                   connectionRetryDelayMs * 2, MAX_CONNECTION_RETRY_DELAY_MS,
                 )
@@ -722,18 +735,19 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
           if (failureValue.code !== 'WS_UPGRADE_REQUIRED' && retryable
             && enteringPrewarm && !entry.prewarmSucceeded) {
             entry.prewarmAttempted = true
-            await this.wait(0, failureValue, signal)
+            await this.wait(0, failureValue, signal, telemetry)
             continue
           }
           if (failureValue.code !== 'WS_UPGRADE_REQUIRED' && retryable
             && reconnects < this.maxReconnects) {
-            await this.wait(reconnects, failureValue, signal)
+            await this.wait(reconnects, failureValue, signal, telemetry)
             reconnects++
             continue
           }
           if (failureValue.code === 'WS_UPGRADE_REQUIRED' || retryable) {
             entry.disabled = true
-            yield* this.http.stream(activeGeneration, fallbackMode())
+            telemetry.retry(0)
+            yield* this.http.stream(activeGeneration, fallbackMode(), telemetry)
             requestCompleted = true
             return
           }

@@ -6,7 +6,6 @@ export interface NativeCodexWebSocketTransportOptions extends NativeCodexHttpOpt
     webSocketFactory?: NativeCodexWebSocketFactory;
     webSocketConnectTimeoutMs?: number;
     webSocketIdleTimeoutMs?: number;
-    maxWebSocketFrameBytes?: number;
     maxWebSocketSessions?: number;
     webSocketSessionIdleMs?: number;
     maxWebSocketReconnects?: number;
@@ -19,7 +18,6 @@ export declare class NativeCodexWebSocketTransport implements NativeCodexTranspo
     private readonly sessions;
     private readonly connectTimeoutMs;
     private readonly idleTimeoutMs;
-    private readonly maxFrameBytes;
     private readonly maxSessions;
     private readonly sessionIdleMs;
     private readonly maxReconnects;
@@ -42,5 +40,6 @@ export declare class NativeCodexWebSocketTransport implements NativeCodexTranspo
     private exchange;
     private attempt;
     stream(generation: GenerateOptions, mode?: NativeCodexTransportMode): AsyncIterable<StreamChunk>;
+    private streamTracked;
     dispose(): void;
 }

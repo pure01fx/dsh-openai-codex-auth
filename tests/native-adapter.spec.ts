@@ -6,11 +6,11 @@ import LlmRuntime, {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import OpenAICodexAuth from '../src/index.ts'
-import type { NativeCodexModel } from '../src/catalog.ts'
+import { NativeCodexCatalog, type NativeCodexModel } from '../src/catalog.ts'
 import {
   CODEX_PROVIDER,
   NATIVE_CODEX_PROVIDER,
@@ -334,6 +334,66 @@ describe('NativeCodexAdapter catalog boundary', () => {
     await collect(fallbackAdapter.stream({ ...request(), model: 'gpt-6-astra' }))
     expect(fallbackMode).toEqual({ responsesLite: { defaultVerbosity: 'low' } })
   })
+
+  it('lists Sol dynamically and routes using current catalog metadata', async () => {
+    const fixture = JSON.parse(await readFile(new URL('./fixtures/codex-sol-model.json', import.meta.url), 'utf8'))
+    const row = fixture.models[0]
+    let now = 0
+    const catalog = new NativeCodexCatalog({
+      resolveCredential: async () => ({ accessToken: 'fixture-token', accountId: 'fixture-account' }),
+      cacheTtlMs: 0,
+      now: () => ++now,
+      fetch: vi.fn(async () => new Response(JSON.stringify(fixture))) as typeof fetch,
+    })
+    const seen: Array<{ model: string; mode: unknown }> = []
+    const adapter = new NativeCodexAdapter(catalog, { async *stream(options, mode) {
+      seen.push({ model: options.model, mode })
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } })
+    await expect(adapter.listModels(NATIVE_CODEX_PROVIDER)).resolves.toEqual([
+      { provider: NATIVE_CODEX_PROVIDER, id: 'gpt-6-sol', name: 'GPT-6-Sol', inputModalities: ['text', 'image'] },
+    ])
+    await collect(adapter.stream({ ...request(), model: 'gpt-6-sol' }))
+    await expect(collect(adapter.stream({ ...request(), model: 'gpt-6-sol-fast' })))
+      .rejects.toMatchObject({ code: 'FAST_UNSUPPORTED' })
+    row.additional_speed_tiers = ['fast']
+    row.default_verbosity = 'high'
+    row.model_messages = { instructions_template: 'Short test instructions' }
+    await expect(adapter.listModels(NATIVE_CODEX_PROVIDER)).resolves.toHaveLength(2)
+    await collect(adapter.stream({ ...request(), model: 'gpt-6-sol-fast' }))
+    row.use_responses_lite = false
+    await collect(adapter.stream({ ...request(), model: 'gpt-6-sol' }))
+    delete row.use_responses_lite
+    await collect(adapter.stream({ ...request(), model: 'gpt-6-sol' }))
+    expect(seen).toEqual([
+      { model: 'gpt-6-sol', mode: { responsesLite: { defaultVerbosity: 'low' } } },
+      { model: 'gpt-6-sol', mode: {
+        serviceTier: 'priority', publicModel: 'gpt-6-sol-fast', authorityHash: expect.any(String),
+        responsesLite: { defaultVerbosity: 'high', instructionsTemplate: 'Short test instructions' },
+      } },
+      { model: 'gpt-6-sol', mode: {} },
+      { model: 'gpt-6-sol', mode: {} },
+    ])
+  })
+
+  it.each([undefined, { list: async () => [], etag: () => undefined }])(
+    'uses only exact known Lite fallbacks without catalog metadata (%s)', async catalog => {
+      const seen: unknown[] = []
+      const adapter = new NativeCodexAdapter(catalog, { async *stream(_options, mode) {
+        seen.push(mode)
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      } })
+      for (const model of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-sol-preview', 'gpt-6-unknown']) {
+        await collect(adapter.stream({ ...request(), model }))
+      }
+      await expect(collect(adapter.stream({ ...request(), model: 'gpt-6-sol-fast' })))
+        .rejects.toMatchObject({ code: 'FAST_UNSUPPORTED' })
+      expect(seen).toEqual([
+        { responsesLite: { defaultVerbosity: 'low' } },
+        { responsesLite: { defaultVerbosity: 'low' } }, {}, {},
+      ])
+    },
+  )
 
   it('maps Ultra and Persistent selections to official Responses wire efforts', async () => {
     const model: NativeCodexModel = {

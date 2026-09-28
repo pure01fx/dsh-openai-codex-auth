@@ -13,7 +13,7 @@ import {
   toResponsesInput,
   type ResolvedMessage,
 } from '../src/responses.ts'
-import { DEFAULT_MAX_SSE_EVENT_BYTES, parseSse } from '../src/sse.ts'
+import { parseSse } from '../src/sse.ts'
 
 const LF = String.fromCharCode(10)
 const CRLF = String.fromCharCode(13, 10)
@@ -463,14 +463,7 @@ describe('SSE framing and stream translation', () => {
     expect(onMalformedEvent).toHaveBeenCalledTimes(4_097)
   })
 
-  it('fails fixedly on oversize events and cancellation', async () => {
-    expect(DEFAULT_MAX_SSE_EVENT_BYTES).toBe(64 * 1024 * 1024)
-    await expect(collect(streamResponses(bytes([`data: 1234567890${LF}${LF}`]), {
-      maxEventBytes: 8,
-    }))).rejects.toMatchObject({
-      code: 'SSE_EVENT_TOO_LARGE', message: 'native Codex SSE event exceeded the size limit',
-    })
-
+  it('cancels an active SSE stream', async () => {
     let cancelled = false
     const pending = new ReadableStream<Uint8Array>({ cancel() { cancelled = true } })
     const controller = new AbortController()

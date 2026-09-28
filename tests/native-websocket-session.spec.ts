@@ -140,11 +140,11 @@ describe('NativeCodexWebSocketSessionState', () => {
     expect(state.plan(first, true)).toMatchObject({ incremental: false })
   })
 
-  it('bounds completion identity without limiting output item count', () => {
+  it('accepts long completion identities and many output items', () => {
     const state = new NativeCodexWebSocketSessionState()
     state.plan(request())
-    expect(() => state.complete('r'.repeat(257), []))
-      .toThrowError(expect.objectContaining({ code: 'WS_PROTOCOL_ERROR' }))
+    state.complete('r'.repeat(257), [])
+    expect(state.plan(request(), true).previousResponseId).toBe('r'.repeat(257))
     state.plan(request())
     expect(() => state.complete('resp_many', Array.from(
       { length: 2_049 }, () => ({ type: 'message' }),

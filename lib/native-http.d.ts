@@ -1,3 +1,4 @@
+import { type NetworkTelemetry, type NetworkRequestHandle } from './network-telemetry.js';
 import { type ContentBlock, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { type NativeCodexCredential } from './catalog.js';
 import { type NativeCodexTransportMode } from './native-adapter.js';
@@ -16,15 +17,14 @@ export interface NativeCodexHttpOptions {
     resolveCredential(signal?: AbortSignal): Promise<NativeCodexCredential>;
     recoverCredential?(previous: NativeCodexCredential, signal?: AbortSignal): Promise<boolean>;
     readImage?(attachment: ImageBlock['attachment'], signal?: AbortSignal): Promise<NativeCodexImageRead>;
+    telemetry?: NetworkTelemetry;
     fetch?: typeof fetch;
     endpoint?: string;
     requestTimeoutMs?: number;
     streamIdleTimeoutMs?: number;
-    maxSseEventBytes?: number;
     maxTransientRetries?: number;
     initialRetryDelayMs?: number;
     maxRetryDelayMs?: number;
-    maxRequestBodyBytes?: number;
     random?: () => number;
     sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
     createRequestId?: () => string;
@@ -37,7 +37,6 @@ export interface NativeCodexPreparedRequest {
     generation: GenerateOptions;
     mode: NativeCodexTransportMode;
     request: Record<string, unknown>;
-    body: string;
     routingId: string;
     routingHint: string;
 }
@@ -51,13 +50,13 @@ export declare class NativeCodexHttpTransport {
     private readonly maxRetries;
     private readonly initialDelayMs;
     private readonly maxDelayMs;
-    private readonly maxBodyBytes;
     constructor(options: NativeCodexHttpOptions);
     private retryDelay;
     private wait;
     private waitForConnection;
     endpointUrl(): string;
     prepare(generation: GenerateOptions, mode?: NativeCodexTransportMode): Promise<NativeCodexPreparedRequest>;
-    stream(generation: GenerateOptions, mode?: NativeCodexTransportMode): AsyncIterable<StreamChunk>;
+    stream(generation: GenerateOptions, mode?: NativeCodexTransportMode, telemetry?: NetworkRequestHandle): AsyncIterable<StreamChunk>;
+    private streamTracked;
 }
 export {};

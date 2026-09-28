@@ -41,7 +41,7 @@ const imageRefs = { type: 'array', minItems: 1, maxItems: 5, description: 'Image
   ],
 } }
 const common = {
-  prompt: { type: 'string', description: 'Describe the image to generate or the edits to perform.', minLength: 1, maxLength: 32000 },
+  prompt: { type: 'string', description: 'Describe the image to generate or the edits to perform.', minLength: 1 },
   model: { type: 'string', description: 'Optional Codex image model; defaults to configured imageModel or gpt-image-2.' },
   quality: { type: 'string', enum: ['auto', 'low', 'medium', 'high'] },
   background: { type: 'string', enum: ['auto', 'transparent', 'opaque'] },
@@ -118,7 +118,7 @@ export function registerCodexImageTools(ctx: Context, deps: CloudToolsDependenci
     name: 'codex_image_inspect',
     description: 'Ask a Codex vision model to analyze images, OCR, screenshots or charts. This makes one additional cloud inference call, without recursive tools. Use explicit model or configured visionModel for non-Codex callers. Reports effective detail and actual dimensions.',
     parameters: { type: 'object', additionalProperties: false, required: ['prompt', 'images'], properties: {
-      prompt: { type: 'string', minLength: 1, maxLength: 32000 }, images: imageRefs,
+      prompt: { type: 'string', minLength: 1 }, images: imageRefs,
       model: { type: 'string' }, detail: { type: 'string', enum: ['auto', 'low', 'high', 'original'] }, reasoning_effort: { type: 'string' },
     } },
     output, timeoutMs: 120_000, isConcurrencySafe: () => true,

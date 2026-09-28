@@ -19,7 +19,7 @@ export function parseCloudVisionArgs(value: unknown): CloudVisionArgs {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Vision arguments must be an object')
   const row = value as Record<string, unknown>
   if (Object.keys(row).some(key => !['prompt', 'images', 'model', 'detail', 'reasoning_effort'].includes(key))) throw new Error('Unknown vision argument')
-  if (typeof row.prompt !== 'string' || !row.prompt.trim() || Buffer.byteLength(row.prompt) > 32_000) throw new Error('Vision prompt must be a nonempty bounded string')
+  if (typeof row.prompt !== 'string' || !row.prompt.trim()) throw new Error('Vision prompt must be a nonempty string')
   const selection = validateImageSelection(row)
   if (!selection.images) throw new Error('Vision requires explicit images')
   for (const key of ['model', 'reasoning_effort']) {
@@ -82,18 +82,12 @@ export async function inspectCloudImages(args: CloudVisionArgs, deps: CloudVisio
       ...(model.instructionsTemplate === undefined ? {} : { instructionsTemplate: model.instructionsTemplate }),
     } } : {}) })
   const texts = new Map<number, string>()
-  let visibleBytes = 0
   let usage: TokenUsage | undefined
   let finished = false
   for await (const chunk of chunks) {
     if (chunk.type === 'tool-call-delta' || (chunk.type === 'block-start' && chunk.blockType === 'tool-call')) throw new LlmError('Image inspection returned an unexpected tool call', 'UNSUPPORTED')
-    if (chunk.type === 'text-delta') {
-      visibleBytes += Buffer.byteLength(chunk.text)
-      if (visibleBytes > 128 * 1024) throw new LlmError('Image inspection output exceeded limit', 'RESPONSE_TOO_LARGE')
-    }
     if (chunk.type === 'block-end' && chunk.block.type === 'text') {
       texts.set(chunk.index, chunk.block.text)
-      if ([...texts.values()].reduce((bytes, text) => bytes + Buffer.byteLength(text), 0) > 128 * 1024) throw new LlmError('Image inspection output exceeded limit', 'RESPONSE_TOO_LARGE')
     }
     if (chunk.type === 'usage') usage = chunk.usage
     if (chunk.type === 'finish') {

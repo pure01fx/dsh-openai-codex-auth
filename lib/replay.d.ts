@@ -1,4 +1,4 @@
-/** Bounded, versioned Codex Responses continuation state. */
+/** Versioned Codex Responses continuation state. */
 import { type ContentBlock } from '@deepseek-ai/dsh-llm';
 export declare const NATIVE_CODEX_REPLAY_KIND = "openai-codex-native.responses-replay";
 export declare const NATIVE_CODEX_REPLAY_VERSION = 1;
@@ -33,12 +33,11 @@ export interface NativeCodexReplaySource {
 export declare function replayableItemId(value: string | undefined): string | undefined;
 /** True only for legacy raw state or an rc.2 envelope emitted by this package. */
 export declare function hasNativeCodexReplayKind(value: unknown): boolean;
-/** Attempt-local byte-bounded accumulator; no ciphertext can grow unchecked before completion. */
+/** Attempt-local accumulator for completed replay descriptors. */
 export declare class NativeCodexReplayCapture {
     private readonly provider;
     private readonly model;
     private readonly descriptors;
-    private stateBytes;
     constructor(provider: string, model: string);
     add(item: NativeCodexReplayDescriptor): void;
     finish(): NativeCodexReplayState | undefined;

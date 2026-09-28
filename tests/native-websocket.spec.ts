@@ -110,6 +110,66 @@ function finishState(chunks: StreamChunk[]): unknown {
 }
 
 describe('NativeCodexWebSocketTransport', () => {
+  it.each(['incremental', 'changed-model', 'reconnect', 'http-fallback'] as const)(
+    'preserves image context across transport paths: %s', async (scenario) => {
+      const answer = '长'.repeat(1000)
+      const scripted = socket([
+        completed('resp_warm'),
+        ...textResponse('resp_one', 'msg_one', answer),
+        ...(['incremental', 'changed-model'].includes(scenario) ? textResponse('resp_two', 'msg_two', 'done') : []),
+      ])
+      const replacement = socket(textResponse('resp_reconnected', 'msg_reconnected', 'done'))
+      const fetchMock = vi.fn(async (_input: unknown, _init?: RequestInit) => response())
+      const transport = new NativeCodexWebSocketTransport({
+        resolveCredential: async () => CREDENTIAL,
+        readImage: async () => ({ data: new Uint8Array(512) }),
+        webSocketFactory: new ScriptedFactory([scripted, replacement]),
+        fetch: fetchMock as typeof fetch,
+        maxWebSocketReconnects: scenario === 'http-fallback' ? 0 : 1,
+        sleep: async () => {},
+      })
+      try {
+        const user = createUserMessage({
+          content: [{ type: 'image', attachment: {
+            attachmentId: 'image-history', mediaType: 'image/png', bytes: 512, width: 1, height: 1,
+          } }], source: { kind: 'user' },
+        })
+        const initial = firstRequest(user)
+        const first = await collect(transport.stream(initial))
+        const assistant = createAssistantMessage({
+          content: [{ type: 'text', text: answer }],
+          source: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base', replayState: finishState(first) },
+        })
+        const next = {
+          ...initial,
+          ...(scenario === 'changed-model' ? { model: 'gpt-other' } : {}),
+          messages: [user, assistant, createUserMessage({
+            content: [{ type: 'text', text: 'next' }], source: { kind: 'user' },
+          })],
+        }
+        if (scenario === 'incremental') {
+          await collect(transport.stream(next))
+          const payload = JSON.parse(scripted.sent[2]!)
+          expect(payload.previous_response_id).toBe('resp_one')
+          expect(payload.input).toEqual([{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }])
+          expect(scripted.sent[2]).not.toContain('data:image/')
+        } else {
+          await collect(transport.stream(next))
+          const encoded = scenario === 'changed-model' ? scripted.sent[2]!
+            : scenario === 'reconnect' ? replacement.sent[0]!
+              : String(fetchMock.mock.calls[0]?.[1]?.body)
+          const payload = JSON.parse(encoded)
+          expect(payload.previous_response_id).toBeUndefined()
+          expect(payload.input).toHaveLength(3)
+          expect(encoded).toContain('data:image/png;base64,')
+        }
+        expect(fetchMock).toHaveBeenCalledTimes(scenario === 'http-fallback' ? 1 : 0)
+      } finally {
+        transport.dispose()
+      }
+    },
+  )
+
   it('sends exact v2 handshake, prewarm, and cross-turn incremental suffix', async () => {
     const scripted = socket([
       JSON.stringify({ type: 'response.created', response: { turn_state: 'turn-one' } }),
@@ -145,7 +205,6 @@ describe('NativeCodexWebSocketTransport', () => {
     expect(factory.options).toHaveLength(1)
     expect(factory.options[0]).toMatchObject({
       url: 'https://chatgpt.com/backend-api/codex/responses',
-      maxFrameBytes: 64 * 1024 * 1024,
       headers: {
         authorization: 'Bearer synthetic-token',
         'chatgpt-account-id': 'synthetic-account',
@@ -1014,6 +1073,49 @@ describe('NativeCodexWebSocketTransport', () => {
     expect(fallbackHeaders?.get('x-codex-turn-state')).toBe('fallback-sticky')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
+
+  for (const wire of ['error', 'response.failed'] as const) {
+    it.each([
+    ['slow_down', 'RATE_LIMIT', 2000],
+    ['credit_balance_exhausted', 'QUOTA', undefined],
+    ['organization_spend_limit_exceeded', 'QUOTA', undefined],
+    ['project_spend_limit_exceeded', 'QUOTA', undefined],
+    ['invalid_prompt', 'INVALID_PROMPT', undefined],
+  ] as const)(
+      wire + ' classifies %s without reconnecting or falling back to HTTP',
+      async (code, expectedCode, delay) => {
+        const error = { code, message: 'Please try again in 2s. private-provider-detail' }
+        const scripted = socket([
+          completed('resp_warm'),
+          JSON.stringify(wire === 'error'
+            ? { type: wire, status: code === 'invalid_prompt' ? 400 : 429,
+              headers: { 'x-request-id': 'req-ws-new-error' }, error }
+            : { type: wire, response: { error } }),
+        ])
+        const factory = new ScriptedFactory([scripted])
+        const fetchMock = vi.fn(async () => response())
+        const transport = new NativeCodexWebSocketTransport({
+          resolveCredential: async () => CREDENTIAL,
+          webSocketFactory: factory,
+          fetch: fetchMock as typeof fetch,
+        })
+        try {
+          const failure = await collect(transport.stream(firstRequest())).catch((reason: unknown) => reason)
+          expect(failure).toBeInstanceOf(LlmError)
+          expect(failure).toMatchObject({
+            code: wire === 'error' && expectedCode === 'RATE_LIMIT' ? 'RATE_LIMITED' : expectedCode,
+          })
+          expect((failure as LlmError).failure.providerRetryAfterMs).toBe(delay)
+          if (wire === 'error') expect((failure as LlmError).failure).toMatchObject({
+            status: code === 'invalid_prompt' ? 400 : 429, requestId: 'req-ws-new-error',
+          })
+          expect(JSON.stringify(failure)).not.toContain('private-provider-detail')
+          expect(factory.options).toHaveLength(1)
+          expect(fetchMock).not.toHaveBeenCalled()
+        } finally { transport.dispose() }
+      },
+    )
+  }
 
   it('classifies wrapped outer status_code without unsafe fallback', async () => {
     const scripted = socket([

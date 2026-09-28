@@ -5,15 +5,12 @@ export interface NativeCodexCloudOptions {
     fetch?: typeof fetch;
     endpoint?: string;
     requestTimeoutMs?: number;
-    maxRequestBodyBytes?: number;
-    maxResponseBytes?: number;
 }
 export interface NativeCodexCloudPostOptions {
     credential: NativeCodexCredential;
     signal: AbortSignal;
     headers?: Record<string, string>;
     timeoutMs?: number;
-    maxResponseBytes?: number;
 }
 export type NativeCodexCloudPath = 'alpha/search' | 'images/generations' | 'images/edits';
 export declare class NativeCodexCloudClient {

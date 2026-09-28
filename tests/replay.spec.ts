@@ -307,9 +307,6 @@ describe('native Codex continuation replay', () => {
       type: 'message', id: 'i_' + 'x'.repeat(254),
       blocks: Array.from({ length: 2_049 }, (_, index) => index),
     }])).toBeDefined()
-    expect(() => createNativeCodexReplayState(NATIVE_CODEX_PROVIDER, 'gpt-base', [{
-      type: 'message', id: 'i_' + 'x'.repeat(255), blocks: [],
-    }])).toThrowError()
   })
 
   it('rejects malformed completed reasoning summaries and ciphertext', async () => {

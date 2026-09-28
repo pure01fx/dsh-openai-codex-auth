@@ -22,7 +22,7 @@ export declare function buildCloudSearchRequest(args: CloudSearchArgs, context: 
     model: string;
     input?: unknown;
 }): Record<string, unknown>;
-/** Keep whole opaque result entries and identify any omitted data explicitly. */
+/** Preserve complete output and opaque result entries. */
 export declare function parseCloudSearchResponse(body: unknown): {
     output: string;
     results?: unknown[];

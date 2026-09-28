@@ -1,7 +1,5 @@
-/** Bounded, cancellable Server-Sent Events byte framing. */
+/** Cancellable Server-Sent Events byte framing. */
 import { LlmError } from '@deepseek-ai/dsh-llm'
-
-export const DEFAULT_MAX_SSE_EVENT_BYTES = 64 * 1024 * 1024
 
 export interface SseEvent {
   data: string
@@ -12,33 +10,23 @@ export interface ParseSseOptions {
   signal?: AbortSignal
   onActivity?: () => void
   onBytes?: (bytes: number) => void
-  maxEventBytes?: number
 }
 
 function aborted(): LlmError {
   return new LlmError('native Codex SSE stream was cancelled', 'ABORTED')
 }
 
-function tooLarge(): LlmError {
-  return new LlmError('native Codex SSE event exceeded the size limit', 'SSE_EVENT_TOO_LARGE')
-}
-
-/** Decode a byte stream into bounded SSE frames. */
+/** Decode a byte stream into SSE frames. */
 export async function* parseSse(
   stream: ReadableStream<Uint8Array>,
   options: ParseSseOptions = {},
 ): AsyncGenerator<SseEvent> {
-  const limit = options.maxEventBytes ?? DEFAULT_MAX_SSE_EVENT_BYTES
-  if (!Number.isSafeInteger(limit) || limit <= 0) {
-    throw new LlmError('native Codex SSE size limit is invalid', 'INVALID_CONFIG')
-  }
   if (options.signal?.aborted === true) throw aborted()
   const reader = stream.getReader()
   const decoder = new TextDecoder()
   let pending = ''
   let dataLines: string[] = []
   let eventName: string | undefined
-  let eventBytes = 0
   let cancelled = false
   const onAbort = (): void => {
     cancelled = true
@@ -54,7 +42,6 @@ export async function* parseSse(
       options.onActivity?.()
       options.onBytes?.(value.byteLength)
       pending += decoder.decode(value, { stream: true })
-      if (Buffer.byteLength(pending) > limit && !pending.includes('\n')) throw tooLarge()
       let newline = pending.indexOf('\n')
       while (newline >= 0) {
         let line = pending.slice(0, newline)
@@ -70,11 +57,8 @@ export async function* parseSse(
           }
           dataLines = []
           eventName = undefined
-          eventBytes = 0
           continue
         }
-        eventBytes += Buffer.byteLength(line) + 1
-        if (eventBytes > limit) throw tooLarge()
         if (line.startsWith(':')) options.onActivity?.()
         else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''))
         else if (line.startsWith('event:')) eventName = line.slice(6).replace(/^ /, '')

@@ -225,6 +225,8 @@ window.__ModuleLoader__.load({
       .codexQuotaTrack{fill:none;stroke:var(--dsw-alias-border-l3);stroke-width:2px}.codexQuotaAvailable{fill:none;stroke:var(--dsw-alias-state-success-primary);stroke-width:2px;stroke-linecap:round;transition:stroke .25s ease,stroke-dasharray .25s ease,stroke-dashoffset .25s ease}.codexQuotaAvailable.high{stroke:var(--dsw-alias-state-warn-label)}.codexQuotaAvailable.critical{stroke:var(--dsw-alias-state-error-primary)}.codexQuotaLoading{animation:codexQuotaPulse .8s ease-in-out infinite alternate}
       .codexQuotaPanel{z-index:100;box-sizing:border-box;width:272px;border:1px solid var(--dsw-alias-border-inverted);border-radius:12px;padding:12px;background:var(--dsw-specific-menu);box-shadow:var(--dsw-shadow-lv3);color:var(--dsw-alias-label-secondary);cursor:default;font-size:12px;line-height:20px;position:absolute;right:0;bottom:calc(100% + 8px)}.codexQuotaPanelHead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.codexQuotaPanelHead strong{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500}.codexQuotaPanelHead span{color:var(--dsw-alias-label-tertiary)}
       .codexQuotaWindow{padding:7px 0}.codexQuotaWindow+.codexQuotaWindow{border-top:1px solid var(--dsw-alias-border-l2)}.codexQuotaWindowHead{display:flex;align-items:center;justify-content:space-between;gap:10px}.codexQuotaWindowHead strong{font-weight:500;color:var(--dsw-alias-label-secondary)}.codexQuotaWindowHead span{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}.codexQuotaBar{height:4px;margin:6px 0;border-radius:999px;overflow:hidden;background:var(--dsw-alias-interactive-bg-hover)}.codexQuotaBarFill{height:100%;border-radius:inherit;background:var(--dsw-alias-state-success-primary)}.codexQuotaBarFill.high{background:var(--dsw-alias-state-warn-label)}.codexQuotaBarFill.critical{background:var(--dsw-alias-state-error-primary)}.codexQuotaReset{color:var(--dsw-alias-label-tertiary)}.codexQuotaMessage{margin:4px 0;color:var(--dsw-alias-label-tertiary)}.codexQuotaMessage.error{color:var(--dsw-alias-state-error-primary)}
+      .codexNetwork{margin-top:8px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l2)}.codexNetworkHead,.codexNetworkRow{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.codexNetworkHead{margin-bottom:5px}.codexNetworkHead strong{font-weight:500;color:var(--dsw-alias-label-primary)}.codexNetworkRow>span:first-child,.codexNetworkScope{color:var(--dsw-alias-label-tertiary)}.codexNetworkRow>span:last-child{font-variant-numeric:tabular-nums;text-align:right}.codexNetworkScope{margin:6px 0 0;font-size:11px;line-height:16px}.codexNetworkWarning{color:var(--dsw-alias-state-warn-label)}.codexQuotaPanel{max-height:min(680px,75vh);overflow-y:auto;width:min(300px,calc(100vw - 24px))}
+      .codexQuotaReconnecting .codexQuotaTrigger svg,.codexQuotaReconnecting .codexQuotaBarFill{animation:codexReconnectBreath 2s ease-in-out infinite}.codexQuotaReconnecting .codexQuotaTrack,.codexQuotaReconnecting .codexQuotaAvailable{stroke:var(--dsw-alias-state-warn-label)}@keyframes codexReconnectBreath{0%,100%{opacity:1}50%{opacity:.3}}@media(prefers-reduced-motion:reduce){.codexQuotaReconnecting .codexQuotaTrigger svg,.codexQuotaReconnecting .codexQuotaBarFill{animation:none}}
       @keyframes codexPulse{to{background-position:-200% 0}}@keyframes codexQuotaPulse{to{opacity:.35}}@media(prefers-reduced-motion:reduce){.codexSkeleton,.codexQuotaLoading{animation:none}}@media(max-width:620px){.codexHero{padding:14px;flex-direction:column}.codexBody{padding:14px}.codexGrid,.codexModelVisibilityList{grid-template-columns:1fr}.codexAccountOption{align-items:stretch;flex-direction:column;gap:10px}.codexAccountActions{align-self:flex-start}.codexCode{font-size:20px}}
     `
     if (typeof document !== 'undefined' && document.querySelector('style[data-plugin="' + PLUGIN_ID + '"]') === null) {
@@ -408,10 +410,120 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function networkDuration(ms) {
+      const seconds = Math.max(0, Math.floor(ms / 1000))
+      if (seconds < 60) return seconds + ' 秒'
+      return Math.floor(seconds / 60) + ' 分 ' + seconds % 60 + ' 秒'
+    }
+
+    function networkBytes(bytes) {
+      if (bytes < 1024) return Math.round(bytes) + ' B'
+      if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB'
+      return (bytes / 1048576).toFixed(1) + ' MB'
+    }
+
+    function networkSummary(snapshot) {
+      const active = snapshot.requests.filter((request) => !['completed', 'failed', 'cancelled'].includes(request.state))
+      const priority = { retrying: 0, waiting: 1, connecting: 2, preparing: 3, streaming: 4 }
+      const current = active.sort((a, b) => priority[a.state] - priority[b.state] || a.startedAt - b.startedAt)[0]
+        || snapshot.requests.slice().sort((a, b) => b.startedAt - a.startedAt)[0]
+      const labels = { preparing: '准备请求', connecting: '连接中', waiting: '等待响应', streaming: '接收中', retrying: '等待重试', completed: '最近请求已完成', failed: '最近请求失败', cancelled: '最近请求已取消' }
+      const stalled = current && current.state === 'streaming' && snapshot.updatedAt - (current.lastActivityAt || current.startedAt) >= 10000
+      return { current, label: stalled ? '等待后续数据' : current ? labels[current.state] || '状态未知' : '尚无请求', active: active.length > 0 }
+    }
+
+    function useNetworkStats(enabled) {
+      const [sample, setSample] = useState(null)
+      const [error, setError] = useState('')
+      useEffect(() => {
+        if (!enabled) return undefined
+        let disposed = false
+        let timer
+        let controller
+        let timeout
+        let previous
+        const poll = async () => {
+          if (disposed || document.visibilityState === 'hidden') return
+          controller = new AbortController()
+          timeout = window.setTimeout(() => controller.abort(), 5000)
+          try {
+            const response = await fetch(BASE + '/network', { cache: 'no-store', signal: controller.signal })
+            if (!response.ok) throw new Error('HTTP ' + response.status)
+            const snapshot = await response.json()
+            if (!snapshot.totals || !Array.isArray(snapshot.requests)) throw new Error('网络统计暂不可用')
+            const elapsed = previous && snapshot.updatedAt - previous.updatedAt
+            const delta = previous && snapshot.totals.receivedBytes - previous.totals.receivedBytes
+            const rate = previous && previous.startedAt === snapshot.startedAt && elapsed > 0 && delta >= 0
+              ? delta * 1000 / elapsed : null
+            previous = snapshot
+            if (!disposed) { setSample({ snapshot, rate }); setError('') }
+          } catch (failure) {
+            if (!disposed) setError('网络状态更新失败（' + messageOf(failure) + '）')
+          } finally {
+            window.clearTimeout(timeout)
+            controller = null
+            if (!disposed) timer = window.setTimeout(poll, 2000)
+          }
+        }
+        const onVisibility = () => {
+          if (document.visibilityState !== 'hidden' && !controller) {
+            window.clearTimeout(timer)
+            previous = null
+            void poll()
+          }
+        }
+        void poll()
+        document.addEventListener('visibilitychange', onVisibility)
+        return () => {
+          disposed = true
+          window.clearTimeout(timer)
+          window.clearTimeout(timeout)
+          if (controller) controller.abort()
+          document.removeEventListener('visibilitychange', onVisibility)
+        }
+      }, [enabled])
+      return { sample, error }
+    }
+
+    function networkReconnecting(network) {
+      return !network.error && network.sample && network.sample.snapshot.requests.some((request) =>
+        request.retryKind === 'connection' && ['retrying', 'preparing', 'connecting'].includes(request.state))
+    }
+
+    function CodexNetworkStats({ sample, error }) {
+      const snapshot = sample && sample.snapshot
+      const summary = snapshot && networkSummary(snapshot)
+      const current = summary && summary.current
+      const row = (label, value) => h('div', { className: 'codexNetworkRow', key: label }, h('span', null, label), h('span', null, value))
+      return h('section', { className: 'codexNetwork', 'aria-label': 'Codex 网络状态' },
+        h('div', { className: 'codexNetworkHead' }, h('strong', null, '网络'),
+          h('span', { className: error ? 'codexNetworkWarning' : '' }, error ? sample ? '数据已过期' : '读取失败' : summary ? summary.label : '读取中…')),
+        error ? h('p', { className: 'codexQuotaMessage error', role: 'status' }, error) : null,
+        snapshot ? h(React.Fragment, null,
+          row('进行中', snapshot.activeCount + ' 个请求'),
+          current ? row('传输', current.transport === 'websocket' ? 'WebSocket' : 'HTTP / SSE') : null,
+          summary.active && current ? h(React.Fragment, null,
+            row('本次已等待', networkDuration(snapshot.updatedAt - current.startedAt)),
+            row('最近收包', current.lastActivityAt === null ? '尚未收到' : networkDuration(snapshot.updatedAt - current.lastActivityAt) + '前'),
+            row('最近输出', current.lastOutputAt === null ? '尚无输出' : networkDuration(snapshot.updatedAt - current.lastOutputAt) + '前'),
+            current.state === 'retrying' && current.retryAt !== null ? row('下次重试', networkDuration(current.retryAt - snapshot.updatedAt) + '后') : null,
+            row('本次尝试 / 重试', current.attempts + ' / ' + current.retries),
+          ) : null,
+          row('接收速率', error || sample.rate === null ? '—' : networkBytes(sample.rate) + '/s'),
+          row('累计接收', networkBytes(snapshot.totals.receivedBytes)),
+          row('请求 / 成功 / 失败', snapshot.totals.requests + ' / ' + snapshot.totals.succeeded + ' / ' + snapshot.totals.failed),
+          row('累计重试 / 取消', snapshot.totals.retries + ' / ' + snapshot.totals.cancelled),
+          h('p', { className: 'codexNetworkScope' }, '本次加载以来 · 所有会话的原生 Codex 请求。接收量为响应及心跳载荷，不含协议开销。' + (snapshot.activeCount > 1 ? '上方显示优先等待的请求。' : '') + (snapshot.truncated ? '仅保留最近请求明细。' : '')),
+        ) : null,
+      )
+    }
+
     function CodexQuotaRing(props) {
       const running = props.useSession((snapshot) => snapshot.running)
       const status = useSharedStatus()
       const [open, setOpen] = useState(false)
+      const network = useNetworkStats(Boolean(status && status.loggedIn))
+      const reconnecting = networkReconnecting(network)
       const [loading, setLoading] = useState(false)
       const [error, setError] = useState('')
       const rootRef = useRef(null)
@@ -462,7 +574,7 @@ window.__ModuleLoader__.load({
       const used = meter ? Math.max(0, Math.min(100, Number(meter.usedPercent) || 0)) : 0
       const remaining = Math.max(0, 100 - used)
       const reading = meter ? Math.round(remaining) + '%' : '待更新'
-      const title = loading ? '正在刷新 Codex 额度' : 'Codex 额度剩余 ' + reading + '；点击刷新'
+      const title = reconnecting ? 'Codex 网络不可用，正在持续重连' : loading ? '正在刷新 Codex 额度' : 'Codex 额度剩余 ' + reading + '；点击刷新'
       const circumference = 2 * Math.PI * 5.5
       const usedLength = circumference * used / 100
       const remainingLength = circumference - usedLength
@@ -472,7 +584,7 @@ window.__ModuleLoader__.load({
 
       return h('span', {
         ref: rootRef,
-        className: 'codexQuotaRoot',
+        className: 'codexQuotaRoot' + (reconnecting ? ' codexQuotaReconnecting' : ''),
         onMouseEnter: () => { setOpen(true) },
         onMouseLeave: () => { setOpen(false) },
       },
@@ -510,6 +622,7 @@ window.__ModuleLoader__.load({
           windows.length > 0
             ? windows.map((row) => h(QuotaWindow, { key: row.name, name: row.name, window: row.window }))
             : h('p', { className: 'codexQuotaMessage' }, '点击圆圈刷新最新额度。'),
+          h(CodexNetworkStats, network),
           status.usageError ? h('p', { className: 'codexQuotaMessage error', role: 'status' }, '额度读取失败：' + status.usageError) : null,
           error ? h('p', { className: 'codexQuotaMessage error', role: 'status' }, '无法连接额度接口：' + error) : null,
         ) : null,

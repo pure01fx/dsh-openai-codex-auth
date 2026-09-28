@@ -5,4 +5,4 @@ export declare const TRACKED_CODEX_RELEASE = "main@ddf04ad";
 /** Independently audited cloud search/image contracts; not local Codex executor parity. */
 export declare const TRACKED_CODEX_CLOUD_COMMIT = "b348fc26674189f758d5941cdab3f78f258b2aa7";
 /** Whole stable release version sent to the Codex model-catalog endpoint. */
-export declare const CODEX_CLIENT_VERSION = "0.153.4";
+export declare const CODEX_CLIENT_VERSION = "0.155.0";

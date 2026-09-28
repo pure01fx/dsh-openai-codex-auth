@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.11.2
+
+- Requests the live model catalog as Codex 0.155.0 so version-gated GPT-6 Sol can be advertised; preserves dynamic account-specific discovery and routes exact Sol requests through Responses Lite when catalog metadata is unavailable. Fast remains catalog-authorized.
+- Classifies `slow_down` as a rate limit with bounded provider wait hints, recognizes credit/organization/project quota exhaustion, and distinguishes `INVALID_PROMPT` across HTTP, SSE, and WebSocket errors without retrying permanent failures or switching transports.
+- Preserves validated image request IDs and HTTP status on rejected responses and malformed JSON/UTF-8, without exposing credential echoes or retrying ambiguous image POSTs.
+
+## 0.11.1
+
+- Adds live network status and process-wide request, retry, and received-payload statistics to the quota panel, distinguishing network activity from model output.
+- Shows a breathing quota indicator during unbounded connection recovery, including while the panel is closed; respects reduced-motion preferences and clears the indicator after recovery, cancellation, or stale status updates.
+- Exposes bounded, content-free telemetry through the protected local network endpoint without additional upstream quota requests or changes to timeout and retry behavior.
+
+## 0.11.0
+
+- Removes plugin payload byte ceilings for native and cloud requests, SSE events, WebSocket messages and queues, response accumulation, encrypted replay state, model catalogs, and image data; removes the corresponding transport options, including `maxRequestBodyBytes`. WebSocket disables the underlying `ws` message-size ceiling explicitly.
+- Keeps WebSocket incremental request preparation separate from HTTP serialization, preserving image history across incremental reuse, reconnects, and HTTP fallback.
+- Preserves complete search output and result arrays, processes all inline result images, forwards selected human search context in full, and removes search batch/domain count ceilings and image-tool prompt length ceilings. Protocol validation, service errors, cancellation, retry/session lifecycle controls, and DSH attachment/file policies still apply.
+
 ## 0.10.1
 
 - Targets DSH 0.1.5-rc.1 with exact SDK peers and runtime helpers; migrates Responses tool calls to ToolCallId.

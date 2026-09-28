@@ -6,7 +6,7 @@ import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deeps
 import type { FileSystem } from '@deepseek-ai/dsh-fs';
 import type { ShellExecutor } from '@deepseek-ai/dsh-shell';
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox';
-import { MAX_IMAGE_BYTES, imageMediaType, validateImageSelection, type ImageSelection, type ParsedImageResponse } from './cloud-images.js';
+import { imageMediaType, validateImageSelection, type ImageSelection, type ParsedImageResponse } from './cloud-images.js';
 
 export interface MediaSourceDependencies {
   fs: Pick<FileSystem, 'resolve' | 'readBytes' | 'processPath'>;
@@ -39,7 +39,6 @@ export async function resolveImageSources(value: ImageSelection, deps: MediaSour
   // Resolve every attachment id before performing any storage reads.
   for (const source of sources) if ('attachment_id' in source && !refs.has(source.attachment_id)) throw new Error('Image attachment is not visible in this session: ' + source.attachment_id);
   const result: ResolvedCloudImage[] = [];
-  let total = 0;
   for (const source of sources) {
     deps.signal?.throwIfAborted();
     let data: Uint8Array;
@@ -47,7 +46,7 @@ export async function resolveImageSources(value: ImageSelection, deps: MediaSour
     let path: string | undefined;
     if ('attachment_id' in source) {
       attachment = refs.get(source.attachment_id)!;
-      if (!Number.isSafeInteger(attachment.bytes) || attachment.bytes <= 0 || attachment.bytes > MAX_IMAGE_BYTES - total) throw new Error('Image inputs exceed byte limit');
+      if (!Number.isSafeInteger(attachment.bytes) || attachment.bytes <= 0) throw new Error('Invalid image byte count');
       const stored = await deps.attachments.readImage(attachment, deps.signal);
       data = stored.data;
       if (stored.ref.attachmentId !== attachment.attachmentId || stored.ref.bytes !== attachment.bytes ||
@@ -56,11 +55,11 @@ export async function resolveImageSources(value: ImageSelection, deps: MediaSour
     } else {
       if (!absoluteWorldPath(source.path)) throw new Error('Image path must be absolute');
       const target = await deps.fs.resolve(source.path, { cwd: deps.workspace, ...(deps.signal ? { signal: deps.signal } : {}) });
-      data = await deps.fs.readBytes(target, deps.signal, MAX_IMAGE_BYTES - total);
+      // The filesystem API requires a numeric bound; impose no plugin-specific byte ceiling.
+      data = await deps.fs.readBytes(target, deps.signal, Number.MAX_SAFE_INTEGER);
       path = deps.fs.processPath(target);
     }
-    total += data.length;
-    if (!data.length || total > MAX_IMAGE_BYTES) throw new Error('Image inputs are empty or exceed byte limit');
+    if (!data.length) throw new Error('Image inputs are empty');
     const mediaType = imageMediaType(data);
     await deps.attachments.validateImage({ data, mediaType });
     const dimensions = encodedDimensions(data);
@@ -89,12 +88,10 @@ const WRITE_ORIGINAL = "const fs=require('node:fs');const path=require('node:pat
 export async function saveImageOutputs(response: ParsedImageResponse, deps: MediaOutputDependencies) {
   if (!absoluteWorldPath(deps.workspace)) throw new Error('Caller workspace must be absolute');
   if (!deps.policy || !deps.shell.sandboxMode) throw new Error('Original image writes require a policy-enforcing DSH shell');
-  let total = 0;
   const dimensions = [];
   for (const image of response.images) {
     deps.signal?.throwIfAborted();
-    total += image.data.length;
-    if (!image.data.length || total > MAX_IMAGE_BYTES) throw new Error('Image outputs exceed byte limit');
+    if (!image.data.length) throw new Error('Image outputs are empty');
     if (imageMediaType(image.data) !== image.mediaType) throw new Error('Output media type does not match bytes');
     await deps.attachments.validateImage({ data: image.data, mediaType: image.mediaType });
     dimensions.push(encodedDimensions(image.data));

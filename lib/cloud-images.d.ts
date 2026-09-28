@@ -1,6 +1,5 @@
-/** Pure image endpoint validation and bounded decoding. */
+/** Pure image endpoint validation and decoding. */
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment';
-export declare const MAX_IMAGE_BYTES: number;
 export type ImageSource = {
     attachment_id: string;
 } | {
@@ -36,7 +35,7 @@ export declare function buildImageEditRequest(value: unknown, images: readonly {
     size: string;
     n?: number;
 };
-export declare function decodeImageBase64(value: unknown, maxBytes?: number): Uint8Array;
+export declare function decodeImageBase64(value: unknown): Uint8Array;
 export declare function imageMediaType(data: Uint8Array): ImageMediaType;
 export interface ParsedCloudImage {
     data: Uint8Array;

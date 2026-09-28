@@ -50,23 +50,21 @@ function boundedText(text: string, bytes: number, tail = false): string {
 }
 /** Last two human texts plus intervening visible assistant text. UTF-8 bytes conservatively
  * upper-bound byte-level tokenizer tokens; a single 1000-byte assistant budget avoids
- * relying on an unavailable model tokenizer. User text has a separate 64 KiB cap. */
+ * relying on an unavailable model tokenizer. The selected human texts are preserved in full. */
 export function recentSearchInput(messages: readonly Message[]): { role: 'user' | 'assistant'; content: string }[] {
   const users = messages.map((message, i) => message.role === 'user' && message.source.kind === 'user' && message.content.some(block => block.type === 'text') ? i : -1).filter(i => i >= 0).slice(-2)
   if (!users.length) return []
   const selected: { role: 'user' | 'assistant'; content: string }[] = []
   let assistantBytes = 1000
-  let userBytes = 64 * 1024
   // Budget newest text first, then restore chronology.
   for (let i = messages.length - 1; i >= users[0]!; i--) {
     const message = messages[i]!
     const user = users.includes(i)
     if (!user && (message.role !== 'assistant' || message.source.kind !== 'model')) continue
     const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
-    const content = boundedText(text, user ? userBytes : assistantBytes, true)
+    const content = user ? text : boundedText(text, assistantBytes, true)
     if (!content) continue
-    if (user) userBytes -= Buffer.byteLength(content)
-    else assistantBytes -= Buffer.byteLength(content)
+    if (!user) assistantBytes -= Buffer.byteLength(content)
     selected.push({ role: user ? 'user' : 'assistant', content })
   }
   return selected.reverse()

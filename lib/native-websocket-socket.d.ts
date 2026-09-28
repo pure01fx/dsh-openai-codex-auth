@@ -10,6 +10,8 @@ export interface NativeCodexWebSocket {
     readonly responseHeaders: Readonly<Record<string, string>>;
     send(text: string, signal?: AbortSignal): Promise<void>;
     receive(signal?: AbortSignal): Promise<NativeCodexWebSocketFrame>;
+    /** Observe incoming payload bytes while a logical inference owns the socket. */
+    observeActivity?(observer: (bytes: number) => void): () => void;
     close(): void;
 }
 export interface NativeCodexWebSocketConnectOptions {
@@ -17,7 +19,6 @@ export interface NativeCodexWebSocketConnectOptions {
     headers: Record<string, string>;
     signal?: AbortSignal;
     connectTimeoutMs?: number;
-    maxFrameBytes?: number;
 }
 export interface NativeCodexWebSocketFactory {
     connect(options: NativeCodexWebSocketConnectOptions): Promise<NativeCodexWebSocket>;

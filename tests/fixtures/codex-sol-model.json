@@ -1,0 +1,49 @@
+{
+  "_source": "openai/codex c44deff7 codex-rs/models-manager/models.json; selected Sol fields, instructions omitted",
+  "models": [
+    {
+      "slug": "gpt-6-sol",
+      "display_name": "GPT-6-Sol",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "minimal_client_version": "0.155.0",
+      "supported_in_api": true,
+      "priority": 2,
+      "use_responses_lite": true,
+      "default_verbosity": "low",
+      "context_window": 272000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_image_detail_original": true
+    }
+  ]
+}

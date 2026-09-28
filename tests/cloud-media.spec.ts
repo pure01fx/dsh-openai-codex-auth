@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveImageSources, saveImageOutputs, type MediaSourceDependencies, type MediaOutputDependencies } from '../src/cloud-media.js';
-import { parseImageResponse, MAX_IMAGE_BYTES } from '../src/cloud-images.js';
+import { parseImageResponse } from '../src/cloud-images.js';
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=';
 const bytes = Buffer.from(png,'base64');
 function fixture() {
@@ -71,7 +71,7 @@ describe('scoped cloud media',()=>{
   expect(deps.attachments.readImage).not.toHaveBeenCalled();
   deps.fs.readBytes.mockRejectedValueOnce(new Error('FS_DENIED'));
   await expect(resolveImageSources({images:[{path:'/denied.png'}]},source)).rejects.toThrow('FS_DENIED');
-  expect(deps.fs.readBytes).toHaveBeenCalledWith({path:'/denied.png'},undefined,MAX_IMAGE_BYTES);
+  expect(deps.fs.readBytes).toHaveBeenCalledWith({path:'/denied.png'},undefined,Number.MAX_SAFE_INTEGER);
   await expect(resolveImageSources({images:[{path:'relative.png'}]},source)).rejects.toThrow('absolute');
  });
  it('retains original path inputs and reports normalized attachment scaling',async()=>{

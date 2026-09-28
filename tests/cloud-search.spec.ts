@@ -48,22 +48,22 @@ describe('cloud search contract', () => {
   it.each([{ mode: 'other' }, { context: 1 }, { model: '' }, { filters: { allowed_domains: [1] } }, { image_settings: { caption: 'yes' } }, { user_location: { type: 'precise' } }, { request_id: 'user-id' }])('rejects invalid settings %j', setting => {
     expect(() => parseCloudSearchArgs({ commands: { time: commands.time }, ...setting })).toThrow()
   })
-  it('enforces operation and request bounds', () => {
-    expect(() => parseCloudSearchArgs({ commands: { time: Array(101).fill({ utc_offset: '+08:00' }) } })).toThrow()
-    expect(() => buildCloudSearchRequest(parseCloudSearchArgs({ commands: { time: commands.time } }), { ...context, input: 'x'.repeat(300_000) })).toThrow()
+  it('forwards complete command arrays and full context', () => {
+    const batch = { time: Array(101).fill({ utc_offset: '+08:00' }) }
+    expect(parseCloudSearchArgs({ commands: batch }).commands).toEqual(batch)
+    const text = 'x'.repeat(300_000)
+    expect(buildCloudSearchRequest(parseCloudSearchArgs({ commands: { time: commands.time } }), { ...context, input: text }).input)
+      .toEqual([{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }])
   })
   it('preserves opaque results, references, link numbers and source URLs without encrypted output', () => {
     const results = [{ type: 'future_variant', ref_id: 'turn0search7', url: 'https://example.com', links: [{ id: 3, ref_id: 'turn0view8' }], nested: { arbitrary: [1, false, null] } }]
     expect(parseCloudSearchResponse({ output: 'Source [turn0search7]', results, encrypted_output: 'private' })).toEqual({ output: 'Source [turn0search7]', results, truncated: false })
     expect(parseCloudSearchResponse({ output: 'No sources' })).toEqual({ output: 'No sources', truncated: false })
   })
-  it('bounds unknown variants without clipping retained reference IDs and reports omissions', () => {
-    const result = parseCloudSearchResponse({ output: '汉'.repeat(100_000), results: [{ huge: 'x'.repeat(300_000) }, { ref_id: 'complete-ref', unknown: true }] })
-    expect(result.results).toEqual([{ ref_id: 'complete-ref', unknown: true }])
-    expect(result.truncated).toBe(true)
-    expect(result.output).toContain('references were omitted')
-    expect(result.output).not.toContain('\uFFFD')
-    expect(Buffer.byteLength(result.output)).toBeLessThan(132_000)
+  it('preserves complete output and unknown result variants', () => {
+    const output = '汉'.repeat(100_000)
+    const results = [{ huge: 'x'.repeat(300_000) }, { ref_id: 'complete-ref', unknown: true }]
+    expect(parseCloudSearchResponse({ output, results })).toEqual({ output, results, truncated: false })
   })
   it.each([null, [], {}, { output: 42 }, { output: 'ok', results: {} }])('rejects malformed responses %j', value => expect(() => parseCloudSearchResponse(value)).toThrow('Invalid Codex search response'))
 })

@@ -157,23 +157,24 @@ describe('codex_web public ToolRuntime integration',()=>{
     vi.spyOn(f.client,'post').mockImplementation(async(_path,_body,{signal})=>new Promise((_resolve,reject)=>{signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true});pending.abort()}))
     expect((await f.execute(undefined,pending.signal)).isError).toBe(true)
   })
-  it('bounds opaque results and preserves unknown keys and nested arrays losslessly',async()=>{
+  it('preserves all opaque results, unknown keys and nested arrays losslessly',async()=>{
     const unknown=JSON.parse('{"__proto__":{"kept":true},"type":"unknown","content":[1,2,3]}')
     const f=setup({response:{output:'large',results:[unknown,...Array.from({length:110},(_,n)=>({n,opaque:'value'}))]}})
     const value=ok(await f.execute())
-    expect(value.results).toHaveLength(100)
+    expect(value.results).toHaveLength(111)
     expect(value.results[0]).toEqual(unknown)
-    expect(value.truncated).toBe(true)
-    expect(value.output).toContain('truncated')
-    expect(Buffer.byteLength(value.output)).toBeLessThan(1024*1024)
+    expect(value.truncated).toBe(false)
+    expect(value.output).not.toContain('truncated')
   })
-  it('limits image count, removes transferred bytes, and keeps chronological attachment order',async()=>{
-    const f=setup({response:{output:'images',results:[{content:Array.from({length:6},()=>({type:'input_image',image_url:'data:image/png;base64,'+png.toString('base64')}))}]}})
+  it('saves every inline image, removes transferred bytes, and keeps chronological attachment order',async()=>{
+    let content: unknown[] = Array.from({length:101},()=>({type:'input_image',image_url:'data:image/png;base64,'+png.toString('base64')}))
+    for(let depth=0;depth<10;depth++) content=[{content}]
+    const f=setup({response:{output:'images',results:[...Array.from({length:100},()=>({type:'unknown'})),{content}]}})
     let count=0
     f.callerCtx.provide('attachments',{saveImage:async()=>({attachmentId:AttachmentId('image-'+(++count)),mediaType:'image/png',bytes:png.length,width:1,height:1})} as any)
     const value=ok(await f.execute())
-    expect(value.images.map((x:any)=>x.attachmentId)).toEqual(['image-1','image-2','image-3','image-4'])
-    expect(value.output).toContain('limit reached')
+    expect(value.images.map((x:any)=>x.attachmentId)).toEqual(Array.from({length:101},(_,i)=>'image-'+(i+1)))
+    expect(value.output).not.toContain('limit reached')
     expect(value.output).not.toContain(png.toString('base64'))
   })
   it('requires an actual reference token and a matching session, not a substring or forged user marker',async()=>{

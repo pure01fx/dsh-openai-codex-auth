@@ -22,6 +22,71 @@ describe('cloud HTTP', () => {
     const h = new Headers(init!.headers)
     expect({ auth: h.get('authorization'), account: h.get('chatgpt-account-id'), accept: h.get('accept'), type: h.get('content-type'), originator: h.get('originator'), id: h.get('x-client-request-id') }).toEqual({ auth: 'Bearer test-secret-token', account: 'acct-a', accept: 'application/json', type: 'application/json', originator: 'dsh', id: 'session-hash' })
   })
+  describe.each(['images/generations', 'images/edits'] as const)('%s request diagnostics', path => {
+    const headerCases: { headers: Record<string, string>; expected: string }[] = [
+      { headers: { 'x-codex-imagegen-request-id': 'image-123', 'x-request-id': 'generic-456' }, expected: 'image-123' },
+      { headers: { 'x-request-id': 'generic-456' }, expected: 'generic-456' },
+    ]
+    it.each(headerCases)('preserves successful header priority: $expected', async ({ headers, expected }) => {
+      const { client } = setup(vi.fn<typeof fetch>().mockResolvedValue(new Response('{}', { headers })))
+      expect(await client.post(path, {}, { credential, signal: signal() })).toEqual({ body: {}, requestId: expected })
+    })
+    describe.each(headerCases)('failure header priority: $expected', ({ headers, expected }) => {
+      it.each([401, 429, 500, 502, 307, 200])('retains requestId and status %s without retrying', async status => {
+        const { client, fetchImpl } = setup(vi.fn<typeof fetch>().mockResolvedValue(new Response('test-secret-token', { status, headers })))
+        const error = await client.post(path, {}, { credential, signal: signal() }).catch(error => error)
+        expect(error).toBeInstanceOf(LlmError)
+        expect(error.failure).toMatchObject({ status, requestId: expected })
+        expect(error.code).toBe(status === 200 ? 'CODEX_CLOUD_FAILED' : status === 401 ? 'AUTH_REQUIRED' : 'CODEX_CLOUD_HTTP_ERROR')
+        expect(error.message).toBe(status === 200 ? 'Codex cloud service returned invalid JSON' : 'Codex cloud service returned HTTP ' + status)
+        expect(JSON.stringify(error)).not.toContain(credential.accessToken)
+        expect(fetchImpl).toHaveBeenCalledTimes(1)
+      })
+    })
+    it('retains response facts on invalid UTF-8', async () => {
+      const { client, fetchImpl } = setup(vi.fn<typeof fetch>().mockResolvedValue(new Response(new Uint8Array([0xff]), {
+        headers: { 'x-codex-imagegen-request-id': 'image-utf8' },
+      })))
+      await expect(client.post(path, {}, { credential, signal: signal() })).rejects.toMatchObject({
+        code: 'CODEX_CLOUD_FAILED', failure: { status: 200, requestId: 'image-utf8' },
+      })
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+    })
+    describe.each(['x-codex-imagegen-request-id', 'x-request-id'])('unsafe %s', header => {
+      it.each(['', 'bad id', 'bad/id', 'a'.repeat(257), credential.accessToken, 'prefix-' + credential.accessToken, credential.accountId])('drops unsafe ID %j on success and failures', async value => {
+        for (const [status, body] of [[200, '{}'], [200, 'invalid'], [500, 'secret']] as const) {
+          const headers = { [header]: value, ...(header === 'x-codex-imagegen-request-id' ? { 'x-request-id': 'generic-456' } : {}) }
+          const { client, fetchImpl } = setup(vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status, headers })))
+          const result = await client.post(path, {}, { credential, signal: signal() }).catch(error => error)
+          if (body === '{}') expect(result).toEqual({ body: {} })
+          else {
+            expect(result).toBeInstanceOf(LlmError)
+            expect(result.failure.status).toBe(status)
+            expect(result.failure.requestId).toBeUndefined()
+            expect(JSON.stringify(result)).not.toContain(credential.accessToken)
+            expect(JSON.stringify(result)).not.toContain(credential.accountId)
+          }
+          expect(fetchImpl).toHaveBeenCalledTimes(1)
+        }
+      })
+    })
+  })
+  it('rejects echoes of either token after credential recovery', async () => {
+    for (const requestId of [credential.accessToken, 'new-token']) {
+      const fetchImpl = vi.fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response('', { status: 401 }))
+        .mockResolvedValueOnce(new Response('invalid', { headers: { 'x-codex-imagegen-request-id': requestId } }))
+      const recoverCredential = vi.fn().mockResolvedValue(true)
+      const { client, resolveCredential } = setup(fetchImpl, { recoverCredential })
+      resolveCredential.mockResolvedValue({ ...credential, accessToken: 'new-token' })
+      const error = await client.post('images/generations', {}, { credential, signal: signal() }).catch(error => error)
+      expect(error).toBeInstanceOf(LlmError)
+      expect(error.failure.status).toBe(200)
+      expect(error.failure.requestId).toBeUndefined()
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+      expect(recoverCredential).toHaveBeenCalledTimes(1)
+    }
+  })
   it('recovers a single 401 with a new token for the same account', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response('', { status: 401 })).mockResolvedValueOnce(json({ output: 'ok' }))
     const recoverCredential = vi.fn().mockResolvedValue(true)
@@ -73,23 +138,11 @@ describe('cloud HTTP', () => {
     await expect(client.post('alpha/search', {}, { credential, signal: signal(), timeoutMs: 5 })).rejects.toMatchObject({ code: 'ABORTED' })
     expect(cancel).toHaveBeenCalled()
   })
-  it.each([false, true])('enforces streamed and declared response byte caps (declared=%s)', async declared => {
-    const cancel = vi.fn()
-    const response = new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('123456')) }, cancel }), { headers: declared ? { 'content-length': '1000' } : {} })
-    const { client } = setup(vi.fn<typeof fetch>().mockResolvedValue(response))
-    await expect(client.post('alpha/search', {}, { credential, signal: signal(), maxResponseBytes: 5 })).rejects.toThrow('byte limit')
-    expect(cancel).toHaveBeenCalled()
-  })
   it('sanitizes interrupted image streams without retrying', async () => {
     const stream = new ReadableStream({ start(c) { c.error(new LlmError('test-secret-token', 'BAD_STREAM')) } })
     const { client, fetchImpl } = setup(vi.fn<typeof fetch>().mockResolvedValue(new Response(stream)))
     await expect(client.post('images/edits', {}, { credential, signal: signal() })).rejects.toThrow('response interrupted; it was not retried')
     expect(fetchImpl).toHaveBeenCalledTimes(1)
-  })
-  it('rejects oversized requests before fetch', async () => {
-    const { client, fetchImpl } = setup(undefined, { maxRequestBodyBytes: 5 })
-    await expect(client.post('alpha/search', { big: 'payload' }, { credential, signal: signal() })).rejects.toThrow('byte limit')
-    expect(fetchImpl).not.toHaveBeenCalled()
   })
   it('sanitizes invalid JSON, resolver and endpoint errors', async () => {
     const { client } = setup(vi.fn<typeof fetch>().mockResolvedValue(new Response('test-secret-token')))

@@ -361,7 +361,28 @@ describe('OpenAICodexAuth routes', () => {
     harness = undefined
   })
 
-  it('registers ten same-origin routes, exposes browser availability, and disposes all routes', async () => {
+  it('serves content-free network snapshots locally and enforces request trust and method', async () => {
+    harness = await createHarness()
+    const fetchSpy = vi.fn(() => { throw new Error('network endpoint must not fetch') })
+    vi.stubGlobal('fetch', fetchSpy)
+    const path = '/openai-codex/network'
+    const result = await call(harness.web, path, request('GET', path, { host: '127.0.0.1:3080' }))
+    expect(result.statusCode).toBe(200)
+    expect(result.headers['cache-control']).toBe('no-store')
+    expect(JSON.parse(result.body)).toMatchObject({ scope: 'process', activeCount: 0, requests: [], totals: { requests: 0 } })
+    expect((await call(harness.web, path, request('GET', path, {
+      host: '127.0.0.1:3080', origin: 'https://untrusted.example',
+    }))).statusCode).toBe(403)
+    expect((await call(harness.web, path, request('GET', path, {
+      host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site',
+    }))).statusCode).toBe(403)
+    const post = await call(harness.web, path, request('POST', path, { host: '127.0.0.1:3080' }))
+    expect(post.statusCode).toBe(405)
+    expect(post.headers.allow).toBe('GET')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('registers same-origin routes, exposes browser availability, and disposes all routes', async () => {
     harness = await createHarness()
     expect([...harness.web.routes.keys()].sort()).toEqual([
       '/openai-codex/accounts/current',
@@ -373,6 +394,7 @@ describe('OpenAICodexAuth routes', () => {
       '/openai-codex/cancel',
       '/openai-codex/device/start',
       '/openai-codex/logout',
+      '/openai-codex/network',
       '/openai-codex/status',
     ])
     const status = await call(harness.web, '/openai-codex/status', request('GET', '/openai-codex/status', {

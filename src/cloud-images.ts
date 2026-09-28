@@ -1,7 +1,6 @@
-/** Pure image endpoint validation and bounded decoding. */
+/** Pure image endpoint validation and decoding. */
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment';
 
-export const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
 export type ImageSource = { attachment_id: string } | { path: string };
 export interface ImageSelection { images?: ImageSource[]; num_last_images_to_include?: number }
 export interface ImageGenerateArgs {
@@ -13,8 +12,8 @@ function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(label + ' must be an object');
   return value as Record<string, unknown>;
 }
-function text(value: unknown, label: string, max = 32_000): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > max) throw new Error(label + ' must be a nonempty bounded string');
+function text(value: unknown, label: string, max?: number): string {
+  if (typeof value !== 'string' || !value.trim() || (max !== undefined && value.length > max)) throw new Error(label + ' must be a valid nonempty string');
   return value;
 }
 function count(value: unknown, label: string, max: number): number {
@@ -65,13 +64,11 @@ export function buildImageEditRequest(value: unknown, images: readonly { image_u
   }
   return { ...validateImageGenerateArgs(value, defaultModel), images: images.map(({ image_url }) => ({ image_url })) };
 }
-export function decodeImageBase64(value: unknown, maxBytes = MAX_IMAGE_BYTES): Uint8Array {
-  const cap = Math.min(maxBytes, MAX_IMAGE_BYTES);
-  if (typeof value !== 'string' || !value.length || value.length > 4 * Math.ceil(cap / 3)) throw new Error('Image base64 is empty or exceeds byte limit');
-  // Check length before scanning or allocating the decoded payload.
+export function decodeImageBase64(value: unknown): Uint8Array {
+  if (typeof value !== 'string' || !value.length) throw new Error('Image base64 is empty');
   if (value.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(value) || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw new Error('Invalid image base64');
   const data = Buffer.from(value, 'base64');
-  if (!data.length || data.length > cap || data.toString('base64') !== value) throw new Error('Invalid image base64 or byte limit exceeded');
+  if (!data.length || data.toString('base64') !== value) throw new Error('Invalid image base64');
   return data;
 }
 export function imageMediaType(data: Uint8Array): ImageMediaType {
@@ -94,11 +91,9 @@ export function parseImageResponse(value: unknown, requestId?: string): ParsedIm
   if (response.quality != null) metadata.quality = choice(response.quality, 'response quality', ['auto', 'low', 'medium', 'high']);
   if (response.size != null) metadata.size = text(response.size, 'response size', 64);
   if (requestId !== undefined) metadata.request_id = text(requestId, 'request_id', 512);
-  let total = 0;
   const images = response.data.map((entry) => {
     const item = object(entry, 'Image response data');
-    const data = decodeImageBase64(item.b64_json, MAX_IMAGE_BYTES - total);
-    total += data.length;
+    const data = decodeImageBase64(item.b64_json);
     const generation_id = item.generation_id == null ? undefined : text(item.generation_id, 'generation_id', 512);
     // Unknown fields may contain payloads or private service state; never copy them to history.
     return { data, mediaType: imageMediaType(data), metadata: generation_id === undefined ? {} : { generation_id },

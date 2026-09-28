@@ -9,7 +9,6 @@ export const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models'
 export const CODEX_CATALOG_CACHE_TTL_MS = 5 * 60_000
 const CODEX_CATALOG_MAX_STALE_MS = 7 * 24 * 60 * 60_000
 const CODEX_CATALOG_TIMEOUT_MS = 5_000
-const MAX_CATALOG_BODY_LENGTH = 2 * 1024 * 1024
 const ORIGINATOR = 'dsh'
 
 /** One request-scoped credential for native Codex backend calls. */
@@ -174,7 +173,7 @@ function parseServiceTiers(value: unknown): readonly NativeCodexServiceTier[] | 
   return tiers
 }
 
-async function boundedResponseText(response: Response): Promise<string> {
+async function responseText(response: Response): Promise<string> {
   if (response.body === null) return ''
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -184,14 +183,6 @@ async function boundedResponseText(response: Response): Promise<string> {
       const { done, value } = await reader.read()
       if (done) break
       total += value.byteLength
-      if (total > MAX_CATALOG_BODY_LENGTH) {
-        await reader.cancel()
-        throw new CatalogFetchError(
-          'native Codex catalog response exceeded the size limit',
-          'CATALOG_INVALID_RESPONSE',
-          true,
-        )
-      }
       chunks.push(value)
     }
   } finally {
@@ -475,7 +466,7 @@ export class NativeCodexCatalog implements NativeCodexModelCatalog {
       }
       let body: string
       try {
-        body = await boundedResponseText(response)
+        body = await responseText(response)
       } catch (error) {
         if (error instanceof CatalogFetchError) throw error
         if (signal?.aborted) throw new LlmError('native Codex catalog request was aborted', 'ABORTED')

@@ -31,10 +31,10 @@ describe('caller-visible cloud context',()=>{
     expect(recentSearchInput(messages)).toEqual([{role:'user',content:'first'},{role:'assistant',content:'answer'},{role:'user',content:'second'}])
     expect(recentSearchInput([assistant('no human')])).toEqual([])
   })
-  it('caps total assistant UTF-8 bytes and user text without broken codepoints',()=>{
+  it('preserves full human text and selects assistant context without broken codepoints',()=>{
     const result=recentSearchInput([user('a'.repeat(100_000)),assistant('😀'.repeat(700)),user('b'),assistant('好'.repeat(400))])
     expect(result.filter(x=>x.role==='assistant').reduce((n,x)=>n+Buffer.byteLength(x.content),0)).toBeLessThanOrEqual(1000)
-    expect(result.filter(x=>x.role==='user').reduce((n,x)=>n+Buffer.byteLength(x.content),0)).toBeLessThanOrEqual(65536)
+    expect(result.filter(x=>x.role==='user')).toEqual([{role:'user',content:'a'.repeat(100_000)},{role:'user',content:'b'}])
     expect(JSON.stringify(result)).not.toContain('�')
     const split=recentSearchInput([user('x'),assistant('😀'.repeat(400)),user('y'),assistant('z')])
     expect(JSON.stringify(split)).not.toContain('�')

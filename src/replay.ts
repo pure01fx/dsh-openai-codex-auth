@@ -1,11 +1,8 @@
-/** Bounded, versioned Codex Responses continuation state. */
+/** Versioned Codex Responses continuation state. */
 import { LlmError, type ContentBlock } from '@deepseek-ai/dsh-llm'
 
 export const NATIVE_CODEX_REPLAY_KIND = 'openai-codex-native.responses-replay'
 export const NATIVE_CODEX_REPLAY_VERSION = 1
-const MAX_REPLAY_ITEM_ID_BYTES = 256
-const MAX_REPLAY_CIPHERTEXT_BYTES = 64 * 1024 * 1024
-const MAX_REPLAY_STATE_BYTES = 64 * 1024 * 1024
 
 export type NativeCodexReplayDescriptor =
   | { type: 'message'; id?: string; blocks: number[] }
@@ -41,28 +38,20 @@ function onlyKeys(row: Record<string, unknown>, keys: readonly string[]): boolea
   return Object.keys(row).every(key => allowed.has(key))
 }
 
-function boundedString(value: unknown, maximum = 256): string | undefined {
-  return typeof value === 'string' && value.length > 0
-    && Buffer.byteLength(value) <= maximum ? value : undefined
+function nonemptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 /** Preserve only server item IDs that Codex itself would replay. */
 export function replayableItemId(value: string | undefined): string | undefined {
   if (value === undefined) return undefined
-  if (Buffer.byteLength(value) > MAX_REPLAY_ITEM_ID_BYTES) {
-    throw failure('native Codex response item identity exceeded the replay limit', 'MALFORMED_RESPONSE')
-  }
   const split = value.indexOf('_')
   return split > 0 && split < value.length - 1 ? value : undefined
 }
 
-function safeStateSize(value: unknown, code: string): void {
-  let serialized: string
-  try { serialized = JSON.stringify(value) } catch {
-    throw failure('native Codex replay state is not lossless JSON', code)
-  }
-  if (Buffer.byteLength(serialized) > MAX_REPLAY_STATE_BYTES) {
-    throw failure('native Codex replay state exceeded the size limit', code)
+function validateStateJson(value: unknown): void {
+  try { JSON.stringify(value) } catch {
+    throw failure('native Codex replay state is not lossless JSON')
   }
 }
 
@@ -81,7 +70,7 @@ function parseDescriptor(value: unknown): NativeCodexReplayDescriptor {
   if (row === undefined || typeof row.type !== 'string') {
     throw failure('native Codex replay descriptor is invalid')
   }
-  const id = row.id === undefined ? undefined : boundedString(row.id, MAX_REPLAY_ITEM_ID_BYTES)
+  const id = row.id === undefined ? undefined : nonemptyString(row.id)
   const split = id?.indexOf('_') ?? -1
   if (row.id !== undefined && (id === undefined || split <= 0 || split >= id.length - 1)) {
     throw failure('native Codex replay item identity is invalid')
@@ -96,7 +85,7 @@ function parseDescriptor(value: unknown): NativeCodexReplayDescriptor {
   if (row.type === 'reasoning') {
     const blocks = validateBlockArray(row.blocks)
     const encryptedContent = row.encryptedContent === undefined
-      ? undefined : boundedString(row.encryptedContent, MAX_REPLAY_CIPHERTEXT_BYTES)
+      ? undefined : nonemptyString(row.encryptedContent)
     if (blocks === undefined
       || (row.encryptedContent !== undefined && encryptedContent === undefined)
       || !onlyKeys(row, ['type', 'id', 'blocks', 'encryptedContent'])) {
@@ -108,7 +97,7 @@ function parseDescriptor(value: unknown): NativeCodexReplayDescriptor {
     }
   }
   if (row.type === 'function_call') {
-    const namespace = row.namespace === undefined ? undefined : boundedString(row.namespace)
+    const namespace = row.namespace === undefined ? undefined : nonemptyString(row.namespace)
     if (!Number.isSafeInteger(row.block) || Number(row.block) < 0
       || (row.namespace !== undefined && namespace === undefined)
       || !onlyKeys(row, ['type', 'id', 'namespace', 'block'])) {
@@ -134,15 +123,15 @@ export function hasNativeCodexReplayKind(value: unknown): boolean {
 
 function parseState(value: unknown): NativeCodexReplayState {
   const payload = replayPayload(value)
-  safeStateSize(payload, 'INVALID_REPLAY_STATE')
+  validateStateJson(payload)
   const row = object(payload)
   if (row === undefined || row.kind !== NATIVE_CODEX_REPLAY_KIND
     || row.version !== NATIVE_CODEX_REPLAY_VERSION
     || !onlyKeys(row, ['kind', 'version', 'provider', 'model', 'items'])) {
     throw failure('native Codex replay state kind or version is invalid')
   }
-  const provider = boundedString(row.provider)
-  const model = boundedString(row.model, 512)
+  const provider = nonemptyString(row.provider)
+  const model = nonemptyString(row.model)
   if (provider === undefined || model === undefined || !Array.isArray(row.items)
     || row.items.length === 0) {
     throw failure('native Codex replay state metadata is invalid')
@@ -157,36 +146,17 @@ function parseState(value: unknown): NativeCodexReplayState {
   }
 }
 
-/** Attempt-local byte-bounded accumulator; no ciphertext can grow unchecked before completion. */
+/** Attempt-local accumulator for completed replay descriptors. */
 export class NativeCodexReplayCapture {
   private readonly descriptors: NativeCodexReplayDescriptor[] = []
-  private stateBytes: number
 
   constructor(
     private readonly provider: string,
     private readonly model: string,
-  ) {
-    this.stateBytes = Buffer.byteLength(JSON.stringify({
-      kind: NATIVE_CODEX_REPLAY_KIND,
-      version: NATIVE_CODEX_REPLAY_VERSION,
-      provider,
-      model,
-      items: [],
-    }))
-  }
+  ) {}
 
   add(item: NativeCodexReplayDescriptor): void {
-    if (item.type === 'reasoning' && item.encryptedContent !== undefined
-      && Buffer.byteLength(item.encryptedContent) > MAX_REPLAY_CIPHERTEXT_BYTES) {
-      throw failure('native Codex encrypted reasoning exceeded the replay limit', 'MALFORMED_RESPONSE')
-    }
-    const itemBytes = Buffer.byteLength(JSON.stringify(item))
-    const nextBytes = this.stateBytes + itemBytes + (this.descriptors.length === 0 ? 0 : 1)
-    if (nextBytes > MAX_REPLAY_STATE_BYTES) {
-      throw failure('native Codex replay state exceeded the size limit', 'REPLAY_STATE_TOO_LARGE')
-    }
     this.descriptors.push(item)
-    this.stateBytes = nextBytes
   }
 
   finish(): NativeCodexReplayState | undefined {
@@ -208,7 +178,6 @@ export function createNativeCodexReplayState(
     model,
     items: items.map(item => ({ ...item })),
   }
-  safeStateSize(state, 'REPLAY_STATE_TOO_LARGE')
   try { return parseState(state) } catch {
     throw failure('native Codex completed items cannot form replay state', 'MALFORMED_RESPONSE')
   }

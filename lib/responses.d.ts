@@ -109,11 +109,9 @@ export declare class ResponsesStreamTranslator {
     private readonly order;
     private readonly replayCapture;
     private nextIndex;
-    private retainedBytes;
     private sawToolCall;
     terminated: boolean;
     constructor(replayContext?: ResponsesReplayContext | undefined);
-    private reserve;
     private append;
     private fill;
     private open;

@@ -1,5 +1,59 @@
 # Codex 云端能力兼容性跟踪
 
+## 已实现：Sol 与错误协议增量适配（0.11.2）
+
+参考上游 `c44deff7b1083e9660ac55d02122481f1cdf139b`，在既有 0.11.1 工作树上完成以下必要改动。此节取代下方历史审查中相应的“待适配”结论；不代表完整上游运行时对齐。
+
+- 模型目录仍动态获取，查询 `client_version` 升至 `0.155.0`，满足上游 Sol 条目的最低版本。仅为缺失目录 metadata 的精确 `gpt-6-sol` 增加 Lite 路由后备；正常目录的 `use_responses_lite` 仍是依据，Fast 仍须目录授权，未知模型不按名称前缀猜测协议。
+- HTTP 错误正文、SSE `response.failed` 与 WS `error` / `response.failed` 共用安全分类。`slow_down` 按限流处理并保留有界等待提示；新增三类 credit/organization/project 额度错误映射宿主 `QUOTA`；`invalid_prompt` 映射独立的 `INVALID_PROMPT`。这些失败不会在传输内重试、重连或回退 HTTP；原有 WS error 包装的限流代码 `RATE_LIMITED` 保持兼容。
+- 图片生成/编辑 HTTP 失败及 JSON/UTF-8 解码失败，通过正式 LlmError failure 元数据保留状态码和校验后的 requestId。图片专用响应头优先；拒绝非法 ID 与 token/account 回显，不增加图片 POST 重试。
+- 新增来自上游的精简 Sol fixture（含全部六档 reasoning effort），覆盖动态目录、最低版本过滤的模拟服务、metadata 优先、缺目录后备、Fast 权限；HTTP/SSE/WS 回归覆盖上述错误的终止行为和隐私边界。模拟版本过滤验证客户端请求条件，不证明真实账号一定获得 Sol。
+
+验证：`pnpm build`、`pnpm test`（26 文件 / 467 项）、`pnpm typecheck`、`git diff --check` 全部通过；生成产物与新鲜编译一致。已更新相关 `lib/` 产物和 CHANGELOG，保留全部已有工作树改动。没有运行真实账号推理、查询线上目录或发布/替换常驻 GUI 插件；当前进程是否使用新构建未验证。Provider/cloud 原始跟踪提交仍分别保持 `ddf04ad` / `b348fc26`，为集合 0.3.7 准备插件版本 0.11.2；尚未发布。
+
+## 上游增量审查：064e701b（插件 0.11.1 工作树）
+
+本次 `../codex` 从 `b348fc26674189f758d5941cdab3f78f258b2aa7` fast-forward 到 `064e701b0fa4f5c0dcaf195a565d088f99bb6af8`，新增 596 个提交；更新后 HEAD 与本次 fetch 的 origin/main 一致，工作树干净。插件以当前已有未提交改动的 0.11.1 工作树为审查对象（Git HEAD 为 `188abd13430b3fff7782c1ee87e5809c4a2e8e96`），不是仅审查已提交版本。
+
+结论：建议做针对性的兼容适配；目前证据不支持“必须整体重写”或“已完整对齐最新上游”。本次只更新上游并记录审查，没有修改插件运行时代码、跟踪常量或发布版本。
+
+### 优先适配：失败响应分类
+
+上游 `codex-rs/codex-api/src/sse/responses.rs` 的变化直接影响现有推理路径：
+
+- `slow_down` 现在与 `rate_limit_exceeded` 一样表示限流，并解析服务端建议等待时间。插件 `src/responses.ts:333` 的 `responsesFailure` 仅对后者返回 `RATE_LIMIT`，前者落入 `SERVER`。
+- `credit_balance_exhausted`、`organization_spend_limit_exceeded`、`project_spend_limit_exceeded` 现在明确归为额度耗尽。插件未按这些 code 分类；若 message 未命中宿主的额度文本识别，会落入 `SERVER`，影响不可重试额度错误的判断。
+- 已用现有 `lib/responses.js` 直接调用复现：上述四个 code 搭配中性 message 均返回 `SERVER`，对照 `rate_limit_exceeded` 返回 `RATE_LIMIT`。这是本地确定性复现，不是线上故障记录。
+- `bio_policy` 在上游已独立分类；插件仍返回不可重试的 `INVALID_REQUEST`。这是诊断粒度差异，优先级低于限流和额度分类。
+
+建议首个适配单元覆盖错误分类、等待时间，以及 HTTP/SSE、WebSocket 两条传输中的终止/重试语义；仅修改版本号不能解决差异。
+
+### 可按需要扩展的能力
+
+- **WebSocket 握手稳定性**：本次上游将已有 HTTP 基础设施 cookie store 接入 WSS 握手，并从成功或拒绝的 upgrade 响应回收 Set-Cookie（`websocket-client/src/lib.rs:145`）。插件没有对应 cookie store。可作为下一优先级的稳定性适配，但未验证当前账号存在握手故障。HTTP cookie store 是上次基线已有能力，不能将整个缺口归为本次新增；实现时应遵循 host/TLS 和基础设施 cookie allowlist，不共享账号/会话 cookie。
+- **WebSocket 空增量续传**：上游 `core/src/client.rs:1377` 放宽为允许与已完成上下文相等的 input；插件 `src/native-websocket-session.ts:83` 默认仍要求严格增长，仅预热例外。可减少无新增 input 时的全量重发，当前没有数据丢失证据。
+- **目录 access programs**：新增可选 `available_access_programs`，插件未建模；需要对应模型访问计划选择时再接入，不能单凭字段新增判定目录解析失败。
+
+- **工作区路由与 gateway OAuth**：上游增加账号工作区路由发现以及独立 gateway 登录。插件仍限制凭据端点为 chatgpt.com 或 loopback（`src/endpoint.ts`），没有对应发现流程。需要面向这类工作区或网关时再设计端点信任、账号绑定及切换后的缓存/连接隔离。上游 `login/src/auth/manager/workspace_routing.rs:63` 明确保留无 resolver 调用者的旧行为，不能据此认定普通 ChatGPT 登录已失效。
+- **推理强度增量更新**：目录新增 `supports_reasoning_effort_updates`；上游以 `configuration_update` 历史项保留请求基线、减少切换 effort 的缓存损失。该路径受功能开关、provider 和模型能力共同控制（`core/src/client.rs:548`）。插件继续使用请求级参数；属于缓存与功能对齐项目，尚无证据表明普通请求因此不兼容。
+- **图片文件引用**：`protocol/src/models.rs:897` 新增 `ImageReference::File { file_id }`，原有 `image_url` wire 形状仍保留。插件继续发送内联图片；搜索结果只提取 `image_url` 图片，不能将不认识的 file_id 视为已下载附件。可在明确上传、下载和账号作用域后单独接入。
+
+### 深入评估：推理增量更新与 file_id
+
+推理增量更新建议先做有开关的实验，暂不默认启用。插件当前 `responses.ts:245` 将 effort 放在请求属性中，`native-websocket-session.ts:57` 对请求属性做复用哈希，因此 effort 改变会使增量链不满足复用条件。保持请求基线并追加 configuration_update 有明确的客户端复用收益机制，但服务端缓存收益尚未实测。真正成本是持久化：现有 `replay.ts:7` 只记录 message/reasoning/function_call，不能直接表示宿主生成的配置更新及其历史位置。需先确认宿主能否提供稳定的轮次、分叉、压缩边界和持久化扩展点，再决定插件内扩展是否足够，不能只做进程内 sessionId→effort 缓存。验收应覆盖 medium→high→medium、断线/重启、分叉、失败重试、成功/失败压缩、模型切换以及能力缺失时保留请求级 effort。收益验证比较匹配历史的缓存输入量、请求字节数和首 token 延迟，不预设改善比例。
+
+file_id 建议暂缓产品化，先验证后端契约。补充检查发现上游 `attachment-store/src/lib.rs:161` 提供的 InlineAttachmentStore 直接返回原字节；`core/src/thread_manager.rs:498` 默认图片存储仍使用它。`core/src/image_preparation.rs:363` 接受可注入存储返回 File，并在上传失败时回退内联。因而协议存在 file_id 不等于默认 Codex 已经提供现成可复制的图片上传闭环。`codex-api/src/files.rs` 的通用/连接器文件上传也不能未经验证就当成 Responses 图片上传。下一步应以一张合成小图验证上传→finalize→同账号 Responses 识图→引用失效/解析契约；若不能确认接受性与生命周期，继续内联。后续实现优先将远端 ID 作为插件内部、按账号与内容隔离的缓存，保留 DSH 本地附件作恢复依据；应对重新上传、账号切换、并发、取消、签名 URL 凭据隔离，并避免中途改变历史图片表示破坏 WS 前缀。现有 WS 增量已避免重复发送不变历史，因此收益主要在 HTTP、多次新连接或跨请求复用，不能直接宣称节省视觉 token。
+
+本轮为源码评估，无线上请求和运行时代码修改；为读取上游接口追加了 `codex-rs/attachment-store` 稀疏检出目录。
+
+### 当前无需随上游机械改动的接口
+
+本次区间 `codex-api/src/search.rs`、`images.rs`、`endpoint/images.rs` 无变化；`endpoint/search.rs` 保留 `alpha/search`，主要是内部常量和测试类型调整。普通 Responses HTTP/WebSocket 仍使用 `/responses`，移除的是 Guardian 专用分支，不要求插件改路由。模型目录支持自定义 URL 和更多可选元数据，不等于默认目录的旧字段全部失效。
+
+### 验证与边界
+
+`pnpm test`：26 个文件、384 项测试全部通过；`pnpm typecheck` 通过；测试包括现有生成产物与新鲜 TypeScript 编译的一致性校验。未执行真实 OAuth、刷新或付费推理；现有回归通过不覆盖上游所有新增行为。原 Provider 基线 `ddf04ad` 与云能力基线 `b348fc26` 保持不变。下方历史章节中的旧缺口、旧测试数量和账号验证不能自动视为当前工作树结论。
+
 ## DSH 0.1.5-rc.1 版本适配
 
 `0.10.1` 迁移 ToolCallId、精确 SDK 依赖和客户端服务提供包，隐藏策略在目录发布投影之前执行。`tests/target-directory.spec.ts` 执行官方 shell 的真实 store/Zustand/Immer 与目标目录/catalog 类，使用合成 Remote 响应和投影输入；这不是浏览器联合验收。`tests/target-services.spec.ts` 使用真实 Cordis/LlmRuntime/ToolRuntime、真实 loopback HTTP/SSE/WebSocket，验证工具 ID、工具执行、含加密 reasoning 的历史回放、永久错误和取消，并确认 WS 没有偷偷回退 HTTP。实际 socket 测试也修复了 ws 成功回调为 null 时的误判。

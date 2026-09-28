@@ -24,6 +24,31 @@ function response(body = FIXTURE, init: ResponseInit = {}): Response {
 }
 
 describe('NativeCodexCatalog', () => {
+  it('requests a version that passes the upstream Sol minimum filter', async () => {
+    const fixture = JSON.parse(await readFile(new URL('./fixtures/codex-sol-model.json', import.meta.url), 'utf8'))
+    const versions: string[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const version = new URL(String(input)).searchParams.get('client_version')!
+      versions.push(version)
+      const parts = version.split('.').map(Number)
+      const models = fixture.models.filter((model: { minimal_client_version: string }) => {
+        const minimum = model.minimal_client_version.split('.').map(Number)
+        const firstDifference = parts.findIndex((part, index) => part !== minimum[index])
+        return firstDifference === -1 || parts[firstDifference]! > minimum[firstDifference]!
+      })
+      return response(JSON.stringify({ models }))
+    })
+    const options = { resolveCredential: async () => CREDENTIAL, fetch: fetchMock as typeof fetch }
+    await expect(new NativeCodexCatalog({ ...options, clientVersion: '0.153.4' }).list()).resolves.toEqual([])
+    await expect(new NativeCodexCatalog(options).list()).resolves.toEqual([
+      expect.objectContaining({
+        slug: 'gpt-6-sol', useResponsesLite: true, defaultVerbosity: 'low',
+        supportedReasoningLevels: fixture.models[0].supported_reasoning_levels,
+      }),
+    ])
+    expect(versions).toEqual(['0.153.4', '0.155.0'])
+  })
+
   it('rejects unsupported credential-bearing catalog authorities', () => {
     for (const endpoint of [
       'http://127.attacker.example/models',
@@ -279,18 +304,6 @@ describe('NativeCodexCatalog', () => {
 
     expect(await catalog.list()).toEqual([])
     expect(warnings.at(-1)).toContain('INVALID_CREDENTIAL')
-  })
-
-  it('rejects an oversized catalog before parsing and degrades metadata safely', async () => {
-    const warnings: string[] = []
-    const catalog = new NativeCodexCatalog({
-      resolveCredential: async () => CREDENTIAL,
-      fetch: vi.fn(async () => response('x'.repeat(2 * 1024 * 1024 + 1))) as typeof fetch,
-      warn: message => { warnings.push(message) },
-    })
-
-    await expect(catalog.list()).resolves.toEqual([])
-    expect(warnings.at(-1)).toContain('CATALOG_INVALID_RESPONSE')
   })
 
   it('honors caller abort and applies a bounded timeout to discovery', async () => {

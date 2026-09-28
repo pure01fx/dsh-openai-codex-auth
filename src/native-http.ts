@@ -1,13 +1,10 @@
 /** Native ChatGPT Codex HTTP/SSE transport with safe pre-output retries. */
 import { createHash, randomUUID } from 'node:crypto'
+import { networkTelemetry, trackNetwork, observeNetworkOutput, type NetworkTelemetry, type NetworkRequestHandle } from './network-telemetry.js'
 import {
-  CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
-  isContextWindowExceededError,
-  isQuotaExceededError,
   LlmError,
   ProviderRequestId,
-  QUOTA_EXCEEDED_CODE,
   attributionHeaders,
   type ContentBlock,
   type GenerateOptions,
@@ -26,6 +23,7 @@ import {
   codexRequestBody,
   codexResponseTurnState,
   streamResponses,
+  responsesFailure,
   type ResolvedContentPart,
   type ResolvedMessage,
   type ResolvedToolResultPart,
@@ -51,7 +49,6 @@ const DEFAULT_INITIAL_RETRY_DELAY_MS = 200
 const DEFAULT_MAX_RETRY_DELAY_MS = 10_000
 const INITIAL_CONNECTION_RETRY_DELAY_MS = 5_000
 const MAX_CONNECTION_RETRY_DELAY_MS = 60_000
-const DEFAULT_MAX_REQUEST_BODY_BYTES = 24 * 1024 * 1024
 const MAX_ERROR_BODY_BYTES = 64 * 1024
 
 type ImageBlock = Extract<ContentBlock, { type: 'image' }>
@@ -67,15 +64,14 @@ export interface NativeCodexHttpOptions {
   resolveCredential(signal?: AbortSignal): Promise<NativeCodexCredential>
   recoverCredential?(previous: NativeCodexCredential, signal?: AbortSignal): Promise<boolean>
   readImage?(attachment: ImageBlock['attachment'], signal?: AbortSignal): Promise<NativeCodexImageRead>
+  telemetry?: NetworkTelemetry
   fetch?: typeof fetch
   endpoint?: string
   requestTimeoutMs?: number
   streamIdleTimeoutMs?: number
-  maxSseEventBytes?: number
   maxTransientRetries?: number
   initialRetryDelayMs?: number
   maxRetryDelayMs?: number
-  maxRequestBodyBytes?: number
   random?: () => number
   sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>
   createRequestId?: () => string
@@ -285,7 +281,7 @@ async function resolveMessages(
 }
 
 async function boundedError(
-  response: Response, signal?: AbortSignal,
+  response: Response, signal: AbortSignal | undefined, telemetry: NetworkRequestHandle,
 ): Promise<{ code?: string; message?: string }> {
   if (response.body === null) return {}
   const reader = response.body.getReader()
@@ -304,6 +300,7 @@ async function boundedError(
       const { done, value } = await reader.read()
       if (cancelled) return {}
       if (done) break
+      telemetry.activity(value.byteLength)
       total += value.byteLength
       if (total > MAX_ERROR_BODY_BYTES) {
         await reader.cancel().catch(() => {})
@@ -361,27 +358,23 @@ function errorFacts(
 }
 
 async function httpFailure(
-  response: Response, maxDelayMs: number, signal?: AbortSignal,
+  response: Response, maxDelayMs: number, signal: AbortSignal | undefined, telemetry: NetworkRequestHandle,
 ): Promise<LlmError> {
-  const detail = await boundedError(response, signal)
+  const detail = await boundedError(response, signal, telemetry)
   const facts = errorFacts(response, maxDelayMs)
-  const classification = `${detail.code ?? ''} ${detail.message ?? ''}`
+  const classified = responsesFailure(detail.code, detail.message)
   if (response.status === 401 || response.status === 403) {
     return fixedFailure('native Codex rejected the configured credential', 'AUTH', facts)
   }
+  if (classified.code !== 'SERVER') {
+    const delay = facts?.providerRetryAfterMs ?? classified.failure.providerRetryAfterMs
+    return fixedFailure(classified.message, classified.code, {
+      ...facts,
+      ...(delay === undefined ? {} : { providerRetryAfterMs: Math.min(delay, maxDelayMs) }),
+    })
+  }
   if (response.status === 429) {
-    if (isQuotaExceededError(classification)) {
-      return fixedFailure('native Codex account quota is exhausted', QUOTA_EXCEEDED_CODE, facts)
-    }
     return fixedFailure('native Codex request was rate limited', 'RATE_LIMIT', facts)
-  }
-  if (detail.code === 'context_length_exceeded'
-    || detail.code === 'context_window_exceeded'
-    || isContextWindowExceededError(classification)) {
-    return fixedFailure('native Codex request exceeded the model context window', CONTEXT_WINDOW_EXCEEDED_CODE, facts)
-  }
-  if (isQuotaExceededError(classification)) {
-    return fixedFailure('native Codex account quota is exhausted', QUOTA_EXCEEDED_CODE, facts)
   }
   if (response.status === 408 || response.status === 504) {
     return fixedFailure('native Codex request timed out', 'TIMEOUT', facts)
@@ -445,7 +438,6 @@ export interface NativeCodexPreparedRequest {
   generation: GenerateOptions
   mode: NativeCodexTransportMode
   request: Record<string, unknown>
-  body: string
   routingId: string
   routingHint: string
 }
@@ -459,7 +451,6 @@ export class NativeCodexHttpTransport {
   private readonly maxRetries: number
   private readonly initialDelayMs: number
   private readonly maxDelayMs: number
-  private readonly maxBodyBytes: number
 
   constructor(private readonly options: NativeCodexHttpOptions) {
     this.fetchImpl = options.fetch ?? fetch
@@ -477,9 +468,6 @@ export class NativeCodexHttpTransport {
     this.maxDelayMs = safePositiveInteger(
       options.maxRetryDelayMs, DEFAULT_MAX_RETRY_DELAY_MS, 'maximum retry delay',
     )
-    this.maxBodyBytes = safePositiveInteger(
-      options.maxRequestBodyBytes, DEFAULT_MAX_REQUEST_BODY_BYTES, 'request body limit',
-    )
   }
 
   private retryDelay(retry: number, providerDelay?: number): number {
@@ -490,12 +478,14 @@ export class NativeCodexHttpTransport {
     return Math.max(1, Math.round(exponential * jitter))
   }
 
-  private async wait(retry: number, error: LlmError, signal?: AbortSignal): Promise<void> {
+  private async wait(retry: number, error: LlmError, signal: AbortSignal | undefined, telemetry: NetworkRequestHandle): Promise<void> {
     const delay = this.retryDelay(retry, error.failure.providerRetryAfterMs)
+    telemetry.retry(delay)
     await (this.options.sleep ?? sleep)(delay, signal)
   }
 
-  private async waitForConnection(delayMs: number, signal?: AbortSignal): Promise<void> {
+  private async waitForConnection(delayMs: number, signal: AbortSignal | undefined, telemetry: NetworkRequestHandle): Promise<void> {
+    telemetry.retry(delayMs, 'connection')
     this.options.warn?.(`native Codex network is unavailable; reconnecting in ${delayMs}ms`)
     await (this.options.sleep ?? sleep)(delayMs, signal)
   }
@@ -528,25 +518,37 @@ export class NativeCodexHttpTransport {
           sessionId: stablePromptCacheKey(sessionId) as NonNullable<GenerateOptions['sessionId']>,
         }
     let request: Record<string, unknown>
-    let body: string
     try {
       request = codexRequestBody(wireOptions, messages, mode)
-      body = JSON.stringify(request)
     } catch (error) {
       if (error instanceof LlmError) throw error
       throw fixedFailure('native Codex request could not be encoded', 'INVALID_ARGS', { cause: error })
     }
-    if (Buffer.byteLength(body) > this.maxBodyBytes) {
-      throw fixedFailure('native Codex request exceeded the size limit', 'REQUEST_TOO_LARGE')
-    }
-    return { generation, mode, request, body, routingId, routingHint }
+    // WebSocket chooses a full request or an incremental suffix after preparation.
+    // Serialize only in the selected transport.
+    return { generation, mode, request, routingId, routingHint }
   }
 
   async *stream(
-    generation: GenerateOptions, mode: NativeCodexTransportMode = {},
+    generation: GenerateOptions, mode: NativeCodexTransportMode = {}, telemetry?: NetworkRequestHandle,
   ): AsyncIterable<StreamChunk> {
+    if (telemetry !== undefined) { yield* this.streamTracked(generation, mode, telemetry); return }
+    yield* trackNetwork(this.options.telemetry ?? networkTelemetry, 'http', generation.signal,
+      handle => this.streamTracked(generation, mode, handle))
+  }
+
+  private async *streamTracked(
+    generation: GenerateOptions, mode: NativeCodexTransportMode, telemetry: NetworkRequestHandle,
+  ): AsyncIterable<StreamChunk> {
+    telemetry.state('preparing')
     const prepared = await this.prepare(generation, mode)
-    const { body, routingId, routingHint } = prepared
+    const { request, routingId, routingHint } = prepared
+    let body: string
+    try {
+      body = JSON.stringify(request)
+    } catch (error) {
+      throw fixedFailure('native Codex request could not be encoded', 'INVALID_ARGS', { cause: error })
+    }
     let activeTurnState = mode.turnState
     if (activeTurnState !== undefined
       && (activeTurnState.length === 0 || Buffer.byteLength(activeTurnState) > 4096
@@ -559,6 +561,7 @@ export class NativeCodexHttpTransport {
     let pinnedAccountId = mode.pinnedAccountId
     while (true) {
       throwIfAborted(generation.signal)
+      telemetry.state('preparing')
       const watchdog = attemptWatchdog(
         generation.signal, this.requestTimeoutMs, this.idleTimeoutMs,
       )
@@ -581,6 +584,7 @@ export class NativeCodexHttpTransport {
           )
         }
         fetching = true
+        telemetry.attempt('http')
         response = await this.fetchImpl(this.endpoint, {
           method: 'POST',
           redirect: 'error',
@@ -612,19 +616,21 @@ export class NativeCodexHttpTransport {
           : connection ?? mappedFailure(error, watchdog, generation.signal)
         watchdog.stop()
         if (connection !== undefined) {
-          await this.waitForConnection(connectionRetryDelayMs, generation.signal)
+          await this.waitForConnection(connectionRetryDelayMs, generation.signal, telemetry)
           connectionRetryDelayMs = Math.min(
             connectionRetryDelayMs * 2, MAX_CONNECTION_RETRY_DELAY_MS,
           )
           continue
         }
         if (retryable(failure) && transientRetries < this.maxRetries) {
-          await this.wait(transientRetries++, failure, generation.signal)
+          await this.wait(transientRetries++, failure, generation.signal, telemetry)
           continue
         }
         throw failure
       }
 
+      telemetry.activity()
+      telemetry.state('waiting')
       publishCodexRateLimits(
         credential.accountId,
         parseCodexRateLimitHeaders(response.headers),
@@ -644,7 +650,7 @@ export class NativeCodexHttpTransport {
           const changed = await this.options.recoverCredential(credential, watchdog.signal)
           recovered = true
           watchdog.stop()
-          if (changed) continue
+          if (changed) { telemetry.retry(0); continue }
           throw fixedFailure(
             'native Codex rejected the configured credential',
             'AUTH',
@@ -655,7 +661,7 @@ export class NativeCodexHttpTransport {
           const failure = connection ?? mappedFailure(error, watchdog, generation.signal)
           watchdog.stop()
           if (connection !== undefined) {
-            await this.waitForConnection(connectionRetryDelayMs, generation.signal)
+            await this.waitForConnection(connectionRetryDelayMs, generation.signal, telemetry)
             connectionRetryDelayMs = Math.min(
               connectionRetryDelayMs * 2, MAX_CONNECTION_RETRY_DELAY_MS,
             )
@@ -665,13 +671,13 @@ export class NativeCodexHttpTransport {
         }
       }
       if (!response.ok) {
-        let failure = await httpFailure(response, this.maxDelayMs, watchdog.signal)
+        let failure = await httpFailure(response, this.maxDelayMs, watchdog.signal, telemetry)
         if (generation.signal?.aborted || watchdog.timedOut()) {
           failure = mappedFailure(failure, watchdog, generation.signal)
         }
         watchdog.stop()
         if (retryable(failure) && transientRetries < this.maxRetries) {
-          await this.wait(transientRetries++, failure, generation.signal)
+          await this.wait(transientRetries++, failure, generation.signal, telemetry)
           continue
         }
         throw failure
@@ -688,9 +694,7 @@ export class NativeCodexHttpTransport {
         for await (const chunk of streamResponses(response.body, {
           signal: watchdog.signal,
           onActivity: watchdog.pulse,
-          ...this.options.maxSseEventBytes === undefined
-            ? {}
-            : { maxEventBytes: this.options.maxSseEventBytes },
+          onBytes: bytes => telemetry.activity(bytes),
           onMalformedEvent: () => {
             this.options.warn?.('native Codex ignored a malformed SSE event')
           },
@@ -730,6 +734,7 @@ export class NativeCodexHttpTransport {
           },
         })) {
           emitted = true
+          observeNetworkOutput(telemetry, chunk)
           if (chunk.type === 'finish'
             && ['stop', 'tool-calls', 'max-tokens'].includes(chunk.reason.kind)) completed = true
           yield chunk
@@ -743,7 +748,7 @@ export class NativeCodexHttpTransport {
       } catch (error) {
         const failure = mappedFailure(error, watchdog, generation.signal)
         if (!emitted && retryable(failure) && transientRetries < this.maxRetries) {
-          await this.wait(transientRetries++, failure, generation.signal)
+          await this.wait(transientRetries++, failure, generation.signal, telemetry)
           continue
         }
         if (emitted && retryable(failure)) throw failedStepRetry(failure)

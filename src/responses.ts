@@ -16,7 +16,6 @@ import {
 export const DEFAULT_CODEX_INSTRUCTIONS = 'You are Codex, an AI coding agent. Help the user with software engineering tasks.'
 const CALL_ID_MAX_LENGTH = 64
 const CALL_ID_PREFIX = 'call_'
-const MAX_RETAINED_RESPONSE_BYTES = 64 * 1024 * 1024
 const UUID_NAMESPACE_OID = Buffer.from('6ba7b8129dad11d180b400c04fd430c8', 'hex')
 
 function uuidV5(namespace: Uint8Array, name: string): string {
@@ -337,16 +336,21 @@ export function responsesFailure(code?: string, message?: string): LlmError {
     || isContextWindowExceededError(detail)) {
     return fixedError('native Codex request exceeded the model context window', CONTEXT_WINDOW_EXCEEDED_CODE)
   }
-  if (code === 'insufficient_quota' || isQuotaExceededError(detail)) {
+  if (code === 'insufficient_quota' || code === 'credit_balance_exhausted'
+    || code === 'organization_spend_limit_exceeded' || code === 'project_spend_limit_exceeded'
+    || isQuotaExceededError(detail)) {
     return fixedError('native Codex account quota is exhausted', QUOTA_EXCEEDED_CODE)
   }
-  if (code === 'rate_limit_exceeded') {
+  if (code === 'rate_limit_exceeded' || code === 'slow_down') {
     const delay = retryDelay(message)
     return new LlmError('native Codex request was rate limited', 'RATE_LIMIT', {
       ...delay === undefined ? {} : { providerRetryAfterMs: delay },
     })
   }
-  if (code === 'invalid_prompt' || code === 'bio_policy') {
+  if (code === 'invalid_prompt') {
+    return fixedError('native Codex rejected the prompt', 'INVALID_PROMPT')
+  }
+  if (code === 'bio_policy') {
     return fixedError('native Codex rejected the request', 'INVALID_REQUEST')
   }
   return fixedError('native Codex reported a failed response', 'SERVER')
@@ -396,7 +400,6 @@ export class ResponsesStreamTranslator {
   private readonly order: OpenBlock[] = []
   private readonly replayCapture: NativeCodexReplayCapture | undefined
   private nextIndex = 0
-  private retainedBytes = 0
   private sawToolCall = false
   terminated = false
 
@@ -406,30 +409,18 @@ export class ResponsesStreamTranslator {
       : new NativeCodexReplayCapture(replayContext.provider, replayContext.model)
   }
 
-  private reserve(bytes: number): void {
-    const nextBytes = this.retainedBytes + bytes
-    if (!Number.isSafeInteger(nextBytes) || nextBytes > MAX_RETAINED_RESPONSE_BYTES) {
-      throw fixedError('native Codex response retained content exceeded the size limit', 'RESPONSE_TOO_LARGE')
-    }
-    this.retainedBytes = nextBytes
-  }
-
   private append(block: OpenBlock, delta: string): void {
-    this.reserve(Buffer.byteLength(delta))
     block.text += delta
   }
 
   private fill(block: OpenBlock, text: string): void {
     if (block.text.length > 0) return
-    this.reserve(Buffer.byteLength(text))
     block.text = text
   }
 
   private open(
     key: string, kind: OpenBlock['kind'], chunks: StreamChunk[], callId = '', name?: string,
   ): OpenBlock {
-    this.reserve(128 + Buffer.byteLength(key) + Buffer.byteLength(callId)
-      + (name === undefined ? 0 : Buffer.byteLength(name)))
     const block: OpenBlock = {
       index: this.nextIndex++, kind, text: '', callId,
       ...name === undefined ? {} : { name },
@@ -517,7 +508,7 @@ export class ResponsesStreamTranslator {
           if (item.call_id === undefined || item.call_id.length === 0
             || item.name === undefined || item.name.length === 0
             || (item.namespace !== undefined && (typeof item.namespace !== 'string'
-              || item.namespace.length === 0 || Buffer.byteLength(item.namespace) > 256))
+              || item.namespace.length === 0))
             || typeof item.arguments !== 'string') {
             throw fixedError('native Codex function call has invalid content', 'MALFORMED_RESPONSE')
           }

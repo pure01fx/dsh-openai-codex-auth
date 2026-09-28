@@ -200,6 +200,7 @@ export declare class OpenAICodexAuth extends Service {
     private sendText;
     private trustedManagementRequest;
     private requireCsrf;
+    private handleNetwork;
     private handleStatus;
     private handleAccountUsage;
     private handleDeviceStart;

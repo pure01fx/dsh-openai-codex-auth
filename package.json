@@ -1,6 +1,6 @@
 {
   "name": "@pure01fx/dsh-openai-codex-auth",
-  "version": "0.10.1",
+  "version": "0.11.2",
   "description": "Native ChatGPT Codex provider, device-code-first login, and same-origin Web integration for DeepSeek Harness",
   "license": "MIT",
   "publishConfig": {
@@ -41,6 +41,8 @@
     "lib/native-adapter.d.ts",
     "lib/native-http.js",
     "lib/native-http.d.ts",
+    "lib/network-telemetry.js",
+    "lib/network-telemetry.d.ts",
     "lib/native-websocket.js",
     "lib/native-websocket.d.ts",
     "lib/native-websocket-session.js",

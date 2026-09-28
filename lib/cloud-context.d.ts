@@ -13,7 +13,7 @@ export declare function chooseCloudModel(params: {
 export declare function visibleCloudImages(messages: readonly Message[]): ImageAttachmentRef[];
 /** Last two human texts plus intervening visible assistant text. UTF-8 bytes conservatively
  * upper-bound byte-level tokenizer tokens; a single 1000-byte assistant budget avoids
- * relying on an unavailable model tokenizer. User text has a separate 64 KiB cap. */
+ * relying on an unavailable model tokenizer. The selected human texts are preserved in full. */
 export declare function recentSearchInput(messages: readonly Message[]): {
     role: 'user' | 'assistant';
     content: string;

@@ -27,6 +27,7 @@ import { registerCodexWeb } from './cloud-web-tool.js'
 import type { CodexRateLimitUpdate } from './rate-limits.js'
 import type { CodexResponseUsageObservation } from './response-usage.js'
 import { mergeDirectUsage, normalizeUsage, type UsageSummary } from './usage.js'
+import { networkTelemetry } from './network-telemetry.js'
 export { normalizeUsage } from './usage.js'
 export {
   CODEX_CLIENT_VERSION,
@@ -1002,6 +1003,7 @@ export class OpenAICodexAuth extends Service {
           disposers.push(ctx.webServer.register({ kind: 'exact', path, handler }))
         }
         register('/openai-codex/status', (req, res) => this.handleStatus(req, res))
+        register('/openai-codex/network', (req, res) => this.handleNetwork(req, res))
         register('/openai-codex/device/start', (req, res) => this.handleDeviceStart(req, res))
         register('/openai-codex/browser/start', (req, res) => this.handleBrowserStart(req, res))
         register('/openai-codex/browser/prepare', (req, res) => this.handleBrowserPrepare(req, res))
@@ -2193,6 +2195,15 @@ export class OpenAICodexAuth extends Service {
     if (req.headers['x-dsh-csrf'] === this.csrf) return true
     this.sendJson(res, 403, { error: 'Invalid CSRF token.' })
     return false
+  }
+
+  private handleNetwork(req: IncomingMessage, res: ServerResponse): void {
+    if (!this.trustedManagementRequest(req, res)) return
+    if (req.method !== 'GET') {
+      this.sendJson(res, 405, { error: 'GET only' }, { allow: 'GET' })
+      return
+    }
+    this.sendJson(res, 200, networkTelemetry.snapshot())
   }
 
   private async handleStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {

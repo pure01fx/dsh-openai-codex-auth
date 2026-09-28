@@ -1,5 +1,5 @@
-/** Bounded, nonstreaming Codex cloud requests. Never retry ambiguous POST failures. */
-import { attributionHeaders, LlmError } from '@deepseek-ai/dsh-llm'
+/** Nonstreaming Codex cloud requests. Never retry ambiguous POST failures. */
+import { attributionHeaders, LlmError, ProviderRequestId } from '@deepseek-ai/dsh-llm'
 import type { NativeCodexCredential } from './catalog.js'
 import { nativeCodexEndpoint } from './endpoint.js'
 
@@ -9,15 +9,12 @@ export interface NativeCodexCloudOptions {
   fetch?: typeof fetch
   endpoint?: string
   requestTimeoutMs?: number
-  maxRequestBodyBytes?: number
-  maxResponseBytes?: number
 }
 export interface NativeCodexCloudPostOptions {
   credential: NativeCodexCredential
   signal: AbortSignal
   headers?: Record<string, string>
   timeoutMs?: number
-  maxResponseBytes?: number
 }
 export type NativeCodexCloudPath = 'alpha/search' | 'images/generations' | 'images/edits'
 const fail = (message: string, code = 'CODEX_CLOUD_FAILED') => new LlmError(message, code)
@@ -60,11 +57,9 @@ export class NativeCodexCloudClient {
   async post(path: NativeCodexCloudPath, body: Record<string, unknown>, options: NativeCodexCloudPostOptions): Promise<{ body: unknown; requestId?: string }> {
     if (!['alpha/search', 'images/generations', 'images/edits'].includes(path)) throw fail('Invalid Codex cloud path', 'INVALID_ARGS')
     const timeoutMs = positive(options.timeoutMs ?? this.options.requestTimeoutMs, 120_000)
-    const maxBytes = positive(options.maxResponseBytes ?? this.options.maxResponseBytes, 48 * 1024 * 1024)
-    const requestLimit = positive(this.options.maxRequestBodyBytes, 48 * 1024 * 1024)
     let encoded: string
     try { encoded = JSON.stringify(body) } catch { throw fail('Invalid cloud JSON request', 'INVALID_ARGS') }
-    if (typeof encoded !== 'string' || Buffer.byteLength(encoded) > requestLimit) throw fail('Cloud request exceeds byte limit', 'INVALID_ARGS')
+    if (typeof encoded !== 'string') throw fail('Invalid cloud JSON request', 'INVALID_ARGS')
     let credential = credentialCopy(options.credential)
     const accountId = credential.accountId
     const controller = new AbortController()
@@ -90,6 +85,15 @@ export class NativeCodexCloudClient {
             method: 'POST', redirect: 'error', headers, body: encoded, signal,
           }), signal)
         } catch { throw fail(signal.aborted ? 'Codex cloud request cancelled or timed out' : 'Codex cloud request failed; it was not retried', signal.aborted ? 'ABORTED' : 'CODEX_CLOUD_FAILED') }
+        const rawRequestId = path.startsWith('images/')
+          ? response.headers.get('x-codex-imagegen-request-id') ?? response.headers.get('x-request-id')
+          : response.headers.get('x-request-id')
+        // Validate before branding: response headers are untrusted, including credential echoes.
+        const requestId = rawRequestId && /^[a-zA-Z0-9_.:-]{1,256}$/.test(rawRequestId)
+          && ![options.credential.accessToken, credential.accessToken, accountId].some(secret => rawRequestId.includes(secret))
+          ? ProviderRequestId(rawRequestId) : undefined
+        const responseFail = (message: string, code = 'CODEX_CLOUD_FAILED') =>
+          new LlmError(message, code, { status: response.status, ...(requestId === undefined ? {} : { requestId }) })
         if (!response.ok) {
           void response.body?.cancel().catch(() => {})
           if (response.status === 401 && attempt === 0 && this.options.recoverCredential) {
@@ -102,22 +106,17 @@ export class NativeCodexCloudClient {
               continue
             }
           }
-          throw fail('Codex cloud service returned HTTP ' + response.status, response.status === 401 ? 'AUTH_REQUIRED' : 'CODEX_CLOUD_HTTP_ERROR')
+          throw responseFail('Codex cloud service returned HTTP ' + response.status, response.status === 401 ? 'AUTH_REQUIRED' : 'CODEX_CLOUD_HTTP_ERROR')
         }
         const reader = response.body?.getReader()
         if (!reader) throw fail('Codex cloud response is empty')
         const chunks: Uint8Array[] = []
-        let size = 0
         try {
-          const declared = response.headers.get('content-length')
-          if (declared !== null && Number(declared) > maxBytes) throw fail('Codex cloud response exceeds byte limit')
           while (true) {
             let part: ReadableStreamReadResult<Uint8Array>
             try { part = await cancellable(reader.read(), signal) }
             catch { throw fail(signal.aborted ? 'Codex cloud request cancelled or timed out' : 'Codex cloud response interrupted; it was not retried', signal.aborted ? 'ABORTED' : 'CODEX_CLOUD_FAILED') }
             if (part.done) break
-            size += part.value.byteLength
-            if (size > maxBytes) throw fail('Codex cloud response exceeds byte limit')
             chunks.push(part.value)
           }
         } catch (error) {
@@ -127,11 +126,8 @@ export class NativeCodexCloudClient {
         } finally { reader.releaseLock() }
         let parsed: unknown
         try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) }
-        catch { throw fail('Codex cloud service returned invalid JSON') }
-        const requestId = path.startsWith('images/')
-          ? response.headers.get('x-codex-imagegen-request-id') ?? response.headers.get('x-request-id')
-          : response.headers.get('x-request-id')
-        return { body: parsed, ...(requestId && /^[a-zA-Z0-9_.:-]{1,256}$/.test(requestId) && !requestId.includes(credential.accessToken) ? { requestId } : {}) }
+        catch { throw responseFail('Codex cloud service returned invalid JSON') }
+        return { body: parsed, ...(requestId ? { requestId } : {}) }
       }
       throw fail('Codex cloud authentication failed', 'AUTH_REQUIRED')
     } finally {

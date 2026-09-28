@@ -28,7 +28,7 @@ const operations = {
   response_length: enumeration('short', 'medium', 'long'),
 }
 const parameters = object({
-  commands: { ...object(operations), description: 'One or more nonempty command arrays; at most 100 operations total. Dependent actions require separate calls. screenshot only supports zero-indexed PDF pages.' },
+  commands: { ...object(operations), description: 'One or more nonempty command arrays. Dependent actions require separate calls. screenshot only supports zero-indexed PDF pages.' },
   model: { ...str, description: 'Explicit Codex catalog model; otherwise cloudTools.searchModel, then current openai-codex model. No guessed fallback.' },
   context: { ...str, description: 'Optional explicit text. Default includes last two visible human texts and at most 1000 UTF-8 bytes of visible assistant text.' },
   mode: enumeration('cached', 'indexed', 'live'), search_context_size: enumeration('low', 'medium', 'high'),
@@ -53,11 +53,8 @@ function inputImage(value: unknown): value is Record<string, unknown> & { type: 
 async function admitSearchImages(body: unknown, attachments: AttachmentStore | undefined, signal: AbortSignal) {
   const images: ImageAttachmentRef[] = []
   const notes = new Set<string>()
-  let seen = 0
-  let bytes = 0
-  const visit = async (item: unknown, depth: number): Promise<unknown> => {
+  const visit = async (item: unknown): Promise<unknown> => {
     signal.throwIfAborted()
-    if (depth > 8) return item
     if (inputImage(item)) {
       if (publicUrl(item.image_url)) {
         notes.add('Remote image unavailable: the public DSH web boundary has no binary image retrieval. Image and source links are preserved.')
@@ -68,10 +65,8 @@ async function admitSearchImages(body: unknown, attachments: AttachmentStore | u
       let ref: ImageAttachmentRef | undefined
       try {
         if (!attachments) throw new Error('Attachment service unavailable')
-        if (++seen > 4 || match[2]!.length > 12 * 1024 * 1024) throw new Error('Image count or byte limit')
         const data = Buffer.from(match[2]!, 'base64')
-        bytes += data.length
-        if (!data.length || bytes > 8 * 1024 * 1024 || data.toString('base64') !== match[2]) throw new Error('Invalid or oversized inline image')
+        if (!data.length || data.toString('base64') !== match[2]) throw new Error('Invalid inline image')
         signal.throwIfAborted()
         ref = await attachments.saveImage({ data, mediaType: match[1] as ImageMediaType })
         signal.throwIfAborted()
@@ -83,22 +78,20 @@ async function admitSearchImages(body: unknown, attachments: AttachmentStore | u
       // Binary transfer data must not become historical text; unknown fields remain opaque.
       return { ...item, image_url: ref ? '[DSH attachment ' + ref.attachmentId + ']' : '[inline image unavailable]' }
     }
-    // Bounded structural walk permits known content blocks nested in evolving result DTOs.
+    // Visit known content blocks while keeping unknown object fields opaque.
     if (Array.isArray(item)) {
-      if (item.length > 100) return item // Unknown large arrays stay opaque for bounded parsing.
       const result = []
-      for (const value of item) result.push(await visit(value, depth + 1))
+      for (const value of item) result.push(await visit(value))
       return result
     }
-    if (record(item) && Array.isArray(item.content) && item.content.length <= 100) {
-      return { ...item, content: await visit(item.content, depth + 1) }
+    if (record(item) && Array.isArray(item.content)) {
+      return { ...item, content: await visit(item.content) }
     }
     return item
   }
   if (!record(body) || !Array.isArray(body.results)) return { body, images, notes }
-  // Leave excess entries for the response parser to mark explicitly as truncated.
   const results = []
-  for (let i = 0; i < body.results.length; i++) results.push(i < 100 ? await visit(body.results[i], 0) : body.results[i])
+  for (const item of body.results) results.push(await visit(item))
   return { body: { ...body, results }, images, notes }
 }
 
@@ -184,7 +177,7 @@ export function registerCodexWeb(ctx: Context, deps: { client: NativeCodexCloudC
       checkReferences(args, messages, id, recent)
       const response = await deps.client.post('alpha/search', body, { credential, signal: exec.signal })
       // Validate the envelope before any attachment write; image bytes are replaced
-      // before the final bounded result projection so large valid images can attach.
+      // before the final result projection so inline images become attachments.
       if (!record(response.body) || typeof response.body.output !== 'string' || (response.body.results != null && !Array.isArray(response.body.results))) throw new LlmError('Invalid Codex search response', 'CODEX_CLOUD_FAILED')
       const media = await admitSearchImages(response.body, agent.ctx.attachments, exec.signal)
       const parsed = parseCloudSearchResponse(media.body)

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildImageGenerationRequest, buildImageEditRequest, validateImageSelection, decodeImageBase64, parseImageResponse, MAX_IMAGE_BYTES } from '../src/cloud-images.js';
+import { buildImageGenerationRequest, buildImageEditRequest, validateImageSelection, decodeImageBase64, parseImageResponse } from '../src/cloud-images.js';
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=';
 describe('cloud image protocol', () => {
   it('defaults without inventing n and forwards configured parameters', () => {
@@ -17,9 +17,8 @@ describe('cloud image protocol', () => {
     expect(body).not.toHaveProperty('num_last_images_to_include');
     expect(()=>buildImageEditRequest({prompt:'edit',num_last_images_to_include:2},images.slice(1))).toThrow();
   });
-  it('rejects malformed, noncanonical and huge base64 before accepting bytes', () => {
-    for(const value of ['', '!!!!', 'Zh==', 'Zg=', 'Zg==' + String.fromCharCode(10), 'a'.repeat(4*Math.ceil(MAX_IMAGE_BYTES/3)+4)]) expect(()=>decodeImageBase64(value)).toThrow();
-    expect(()=>decodeImageBase64(png,1)).toThrow();
+  it('rejects malformed and noncanonical base64 before accepting bytes', () => {
+    for(const value of ['', '!!!!', 'Zh==', 'Zg=', 'Zg==' + String.fromCharCode(10)]) expect(()=>decodeImageBase64(value)).toThrow();
     expect(()=>parseImageResponse({data:[{b64_json:'YWJj'}]})).toThrow();
   });
   it('validates required u64 timestamps and bounded optional wire metadata', () => {

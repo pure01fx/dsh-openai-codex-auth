@@ -70,6 +70,25 @@ afterEach(() => {
 })
 
 describe('NativeCodexHttpTransport', () => {
+  it('sends large UTF-8 context intact through HTTP', async () => {
+    const text = '图'.repeat(9 * 1024 * 1024)
+    const generation = request({ messages: [{
+      role: 'user', content: [{ type: 'text', text }],
+    }] })
+    let sent = false
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body))
+        expect(body.input[0].content[0].text).toBe(text)
+        sent = true
+        return successResponse()
+      },
+    })
+    await collect(transport.stream(generation))
+    expect(sent).toBe(true)
+  })
+
   it('sends Astra through HTTP Responses Lite without changing Standard requests', async () => {
     const captured: Array<{ headers: Headers; body: Record<string, unknown> }> = []
     const transport = new NativeCodexHttpTransport({
@@ -1020,6 +1039,43 @@ describe('NativeCodexHttpTransport', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  for (const wire of ['http', 'sse'] as const) {
+    it.each([
+    ['slow_down', 'RATE_LIMIT', 2000],
+    ['credit_balance_exhausted', 'QUOTA', undefined],
+    ['organization_spend_limit_exceeded', 'QUOTA', undefined],
+    ['project_spend_limit_exceeded', 'QUOTA', undefined],
+    ['invalid_prompt', 'INVALID_PROMPT', undefined],
+  ] as const)(
+      wire + ' classifies %s without retrying or exposing provider text',
+      async (code, expectedCode, delay) => {
+        const error = { code, message: 'Please try again in 2s. private-provider-detail' }
+        const fetchMock = vi.fn(async () => wire === 'http'
+          ? new Response(JSON.stringify({ error }), {
+            status: code === 'invalid_prompt' ? 400 : 429,
+            headers: { 'x-request-id': 'req-new-error' },
+          })
+          : successResponse('data: ' + JSON.stringify({ type: 'response.failed', response: { error } }) + '\n\n'))
+        const sleepMock = vi.fn(async () => {})
+        const transport = new NativeCodexHttpTransport({
+          resolveCredential: async () => CREDENTIAL,
+          fetch: fetchMock as typeof fetch,
+          sleep: sleepMock,
+        })
+        const failure = await collect(transport.stream(request())).catch((reason: unknown) => reason)
+        expect(failure).toBeInstanceOf(LlmError)
+        expect(failure).toMatchObject({ code: expectedCode })
+        expect((failure as LlmError).failure.providerRetryAfterMs).toBe(delay)
+        if (wire === 'http') expect((failure as LlmError).failure).toMatchObject({
+          status: code === 'invalid_prompt' ? 400 : 429, requestId: 'req-new-error',
+        })
+        expect(JSON.stringify(failure)).not.toContain('private-provider-detail')
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+        expect(sleepMock).not.toHaveBeenCalled()
+      },
+    )
+  }
+
   it('does not retry rate limits and retains bounded provider facts without secrets', async () => {
     const fetchMock = vi.fn(async () => new Response(
       '{"error":{"code":"rate_limit_exceeded","message":"try later"}}',
@@ -1121,7 +1177,7 @@ describe('NativeCodexHttpTransport', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects attachment, body, and SSE resource violations deterministically', async () => {
+  it('rejects invalid attachments, routing identities, and empty responses', async () => {
     const attachment = {
       attachmentId: 'attachment-invalid', mediaType: 'image/png', bytes: 3,
       width: 1, height: 1,
@@ -1148,27 +1204,11 @@ describe('NativeCodexHttpTransport', () => {
       sessionId: 'invalid\nsession' as GenerateOptions['sessionId'],
     })))).rejects.toMatchObject({ code: 'INVALID_ARGS' })
 
-    const oversizedRequest = new NativeCodexHttpTransport({
-      resolveCredential: async () => CREDENTIAL,
-      maxRequestBodyBytes: 1,
-    })
-    await expect(collect(oversizedRequest.stream(request())))
-      .rejects.toMatchObject({ code: 'REQUEST_TOO_LARGE' })
-
     const bodyless = new NativeCodexHttpTransport({
       resolveCredential: async () => CREDENTIAL,
       fetch: vi.fn(async () => new Response(null, { status: 200 })) as typeof fetch,
     })
     await expect(collect(bodyless.stream(request()))).rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
-
-    const oversizedSse = new NativeCodexHttpTransport({
-      resolveCredential: async () => CREDENTIAL,
-      fetch: vi.fn(async () => successResponse()) as typeof fetch,
-      maxSseEventBytes: 16,
-      maxTransientRetries: 0,
-    })
-    await expect(collect(oversizedSse.stream(request())))
-      .rejects.toMatchObject({ code: 'SSE_EVENT_TOO_LARGE' })
   })
 
   it('preserves caller abort and request timeout during active network reads', async () => {
