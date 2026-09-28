@@ -14,7 +14,7 @@ function fixture() {
  const refs = ['a','b','c'].map(attachmentId=>({attachmentId,mediaType:'image/png',bytes:bytes.length,width:1,height:1}));
  const fs = {resolve:vi.fn(async (path:string, opts?:any)=>({path:path.startsWith('.') ? opts.cwd+'/'+path : path})),processPath:vi.fn((t:any)=>t.path),readBytes:vi.fn(async()=>bytes),contains:vi.fn(()=>true)};
  const attachments = {validateImage:vi.fn(async()=>{}),readImage:vi.fn(async(ref:any)=>({ref,data:bytes})),saveImage:vi.fn(async()=>({...refs[0],bytes:10,width:1,height:1,originalDimensions:{width:2,height:2}}))};
- const shell = {sandboxMode:'workspace-write',resolve:vi.fn(x=>x),run:vi.fn(async()=>({exitCode:0,aborted:false,timedOut:false}))};
+ const shell = {sandboxMode:'workspace-write',resolve:vi.fn(x=>x),execute:vi.fn(async()=>({result:async()=>({exitCode:0,aborted:false,timedOut:false})}))};
  const deps = {fs,attachments,shell,policy:{mode:'workspace-write',workspaceRoot:'/workspace'},workspace:'/workspace',visibleImages:refs};
  return {deps,source:deps as unknown as MediaSourceDependencies,output:deps as unknown as MediaOutputDependencies};
 }
@@ -46,9 +46,9 @@ describe('scoped cloud media',()=>{
   const attachments=new LocalAttachmentStore(ctx,{dshHome:join(home,'store'),normalizedImageMaxDimension:4});
   try {
    const {output,source,deps}=fixture(); output.workspace=home; output.attachments=attachments;
-   deps.shell.run.mockImplementation(async (request:any)=>await new Promise<any>((resolve,reject)=>{
+   deps.shell.execute.mockImplementation(async (request:any)=>await new Promise<any>((resolve,reject)=>{
     const child=spawn('bash',['-c',request.command],{cwd:request.workdir,stdio:['pipe','ignore','pipe']});
-    child.on('error',reject); child.on('close',exitCode=>resolve({exitCode,aborted:false,timedOut:false})); child.stdin.end(request.stdin);
+    child.on('error',reject); child.on('close',exitCode=>resolve({result:async()=>({exitCode,aborted:false,timedOut:false})})); child.stdin.end(request.stdin);
    }));
    const original=await sharp({create:{width:8,height:4,channels:3,background:'#446688'}}).png().toBuffer();
    const result=await saveImageOutputs(parseImageResponse({created:1,data:[{b64_json:original.toString('base64')}]}),output);
@@ -127,8 +127,8 @@ describe('scoped cloud media',()=>{
   const parsed=parseImageResponse({created:1,data:[{b64_json:png}]});
   deps.fs.contains.mockReturnValueOnce(false);
   await expect(saveImageOutputs(parsed,output)).rejects.toThrow('escapes');
-  expect(deps.shell.run).not.toHaveBeenCalled();
-  deps.shell.run.mockResolvedValueOnce({exitCode:1,aborted:false,timedOut:false});
+  expect(deps.shell.execute).not.toHaveBeenCalled();
+  deps.shell.execute.mockResolvedValueOnce({result:async()=>({exitCode:1,aborted:false,timedOut:false})});
   await expect(saveImageOutputs(parsed,output)).rejects.toThrow('policy');
   expect(deps.attachments.saveImage).not.toHaveBeenCalled();
  });
@@ -136,6 +136,6 @@ describe('scoped cloud media',()=>{
   const {output,deps}=fixture();
   deps.attachments.validateImage.mockRejectedValueOnce(new Error('invalid raster'));
   await expect(saveImageOutputs(parseImageResponse({created:1,data:[{b64_json:png}]}),output)).rejects.toThrow('invalid raster');
-  expect(deps.shell.run).not.toHaveBeenCalled();
+  expect(deps.shell.execute).not.toHaveBeenCalled();
  });
 });

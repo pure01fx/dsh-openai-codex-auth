@@ -114,10 +114,10 @@ function checkReferences(args: CloudSearchArgs, messages: readonly Message[], id
   const outputs: string[] = []
   for (const message of messages) {
     if (message.role === 'assistant') for (const block of message.content) if (block.type === 'tool-call') calls.set(block.id, block.name)
-    if (message.source.kind !== 'tool' || !['codex_web', 'run_code'].includes(calls.get(message.source.callId) ?? '')) continue
-    for (const block of message.content) if (block.type === 'tool-result' && block.toolCallId === message.source.callId && !block.isError) {
-      outputs.push(block.content.filter(part => part.type === 'text').map(part => part.text).join('\n'))
-    }
+    if (message.role !== 'tool' || message.isError || message.source.kind !== 'tool'
+      || message.toolCallId !== message.source.callId
+      || !['codex_web', 'run_code'].includes(calls.get(message.toolCallId) ?? '')) continue
+    outputs.push(message.content.filter(block => block.type === 'text').map(block => block.text).join('\n'))
   }
   outputs.push(...recent)
   for (const ref of refs) {

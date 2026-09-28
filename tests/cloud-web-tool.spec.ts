@@ -27,6 +27,19 @@ function setup(options: { account?:string; response?:unknown; messages?:Message[
 }
 const ok=(result:any)=>{expect(result.isError,JSON.stringify(result)).toBe(false);return result.value as any}
 describe('codex_web public ToolRuntime integration',()=>{
+  it.each(['failed', 'mismatched'] as const)('rejects references from %s historical tool results before network', async kind => {
+    const first = await setup().execute()
+    ok(first)
+    const callId = ToolCallId('saved')
+    const result = createToolResultMessage({ callId, content: first.content, isError: kind === 'failed' })
+    const restored = setup({ messages: [
+      createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'tool-call', id: callId, name: 'codex_web', arguments: '{}' }] }),
+      kind === 'mismatched' ? { ...result, toolCallId: ToolCallId('other') } : result,
+    ] })
+    expect((await restored.execute({ commands: { open: [{ ref_id: 'ref_search_1' }] } })).isError).toBe(true)
+    expect(restored.sent).toHaveLength(0)
+  })
+
   it('returns canonical values and visible clickable sources without OAuth or encrypted output',async()=>{
     const f=setup({response:{output:'Answer [Source](https://example.test/a)',encrypted_output:'secret encrypted',results:[{type:'future',ref_id:'ref_a',url:'https://example.test/a',link_id:3,extra:[1,2]}]}})
     const result=await f.execute()

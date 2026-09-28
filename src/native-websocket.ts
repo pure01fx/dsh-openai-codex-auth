@@ -169,7 +169,8 @@ function sessionKey(generation: GenerateOptions, routingId: string): string | un
 function turnKey(generation: GenerateOptions): string {
   for (let index = generation.messages.length - 1; index >= 0; index--) {
     const message = generation.messages[index]
-    if (message?.source.kind === 'user') {
+    // RequestUserInput doesn't have source or id
+    if (message && 'source' in message && message.source?.kind === 'user' && 'id' in message) {
       return createHash('sha256').update(String(message.id)).digest('base64url')
     }
   }

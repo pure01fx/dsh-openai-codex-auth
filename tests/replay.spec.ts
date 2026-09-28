@@ -111,11 +111,10 @@ describe('native Codex continuation replay', () => {
         },
       },
       {
-        role: 'user',
-        content: [{
-          type: 'tool-result', toolCallId: ToolCallId('call_redacted'),
-          content: [{ type: 'text', text: 'found' }],
-        }],
+        role: 'tool' as any,
+        content: [{ type: 'text', text: 'found' }],
+        toolCallId: ToolCallId('call_redacted'),
+        isError: false,
       },
     ]
 
@@ -221,11 +220,10 @@ describe('native Codex continuation replay', () => {
         replaySource: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base', replayState: state },
       },
       {
-        role: 'user',
-        content: [{
-          type: 'tool-result', toolCallId: ToolCallId(longId),
-          content: [{ type: 'text', text: 'ok' }],
-        }],
+        role: 'tool' as any,
+        content: [{ type: 'text', text: 'ok' }],
+        toolCallId: ToolCallId(longId),
+        isError: false,
       },
     ]).input as Array<Record<string, unknown>>
     expect(input[0]?.call_id).toBe(input[1]?.call_id)

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.12.0
+
+### Migration
+
+- Migrated to DSH 0.1.7-rc.2 SDK
+- Updated tool message format: tool results are now role:'tool' with top-level toolCallId/isError
+- Migrated shell.run to shell.execute with result() method
+- Updated peer dependencies to 0.1.7-rc.2
+- Updated cordis to ~4.0.4
+- Preserved developer messages in HTTP/WS wire requests
+- Restored successful-result-only matched provenance in cloud context
+- Added mismatch/failed-result regressions in cloud context tests
+
+### Key Changes
+
+- Tool messages: role:'tool' with top-level toolCallId/isError (no longer tool-result content blocks)
+- Shell: execute() then .result() instead of run()
+- Developer messages: preserved in Responses API requests
+- Cloud context: requires toolCallId === source.callId and !isError
+
 ## 0.11.2
 
 - Requests the live model catalog as Codex 0.155.0 so version-gated GPT-6 Sol can be advertised; preserves dynamic account-specific discovery and routes exact Sol requests through Responses Lite when catalog metadata is unavailable. Fast remains catalog-authorized.

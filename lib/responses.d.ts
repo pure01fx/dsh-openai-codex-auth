@@ -9,18 +9,14 @@ export interface ResolvedImagePart {
     dataBase64: string;
     detail?: CodexImageDetail;
 }
-export interface ResolvedToolResultPart {
-    type: 'tool-result';
-    toolCallId: ToolCallId;
-    content: readonly ResolvedContentPart[];
-    isError?: boolean;
-}
 export type ResolvedContentPart = Exclude<ContentBlock, {
-    type: 'image' | 'tool-result';
-}> | ResolvedImagePart | ResolvedToolResultPart;
+    type: 'image';
+}> | ResolvedImagePart;
 export interface ResolvedMessage {
-    role: 'system' | 'user' | 'assistant';
+    role: 'system' | 'user' | 'assistant' | 'tool' | 'developer';
     content: readonly ResolvedContentPart[];
+    toolCallId?: ToolCallId;
+    isError?: boolean;
     replaySource?: NativeCodexReplaySource;
 }
 export interface ResponsesRequestInput {

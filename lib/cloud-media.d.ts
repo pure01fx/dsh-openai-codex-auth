@@ -24,7 +24,7 @@ export interface ResolvedCloudImage {
 export declare function resolveImageSources(value: ImageSelection, deps: MediaSourceDependencies): Promise<ResolvedCloudImage[]>;
 export interface MediaOutputDependencies {
     fs: Pick<FileSystem, 'resolve' | 'processPath' | 'contains'>;
-    shell: Pick<ShellExecutor, 'resolve' | 'run' | 'sandboxMode'>;
+    shell: Pick<ShellExecutor, 'resolve' | 'execute' | 'sandboxMode'>;
     /** Resolve from the calling session with the public sandboxPolicy service. */
     policy: SandboxExecutionPolicy;
     attachments: Pick<AttachmentStore, 'validateImage' | 'saveImage'>;

@@ -26,7 +26,6 @@ import {
   responsesFailure,
   type ResolvedContentPart,
   type ResolvedMessage,
-  type ResolvedToolResultPart,
 } from './responses.js'
 import { hasNativeCodexReplayKind } from './replay.js'
 import {
@@ -52,7 +51,7 @@ const MAX_CONNECTION_RETRY_DELAY_MS = 60_000
 const MAX_ERROR_BODY_BYTES = 64 * 1024
 
 type ImageBlock = Extract<ContentBlock, { type: 'image' }>
-type ToolResultBlock = Extract<ContentBlock, { type: 'tool-result' }>
+
 
 export interface NativeCodexImageRead {
   data: Uint8Array
@@ -198,27 +197,7 @@ async function resolveImage(
   }
 }
 
-async function resolveToolResult(
-  block: ToolResultBlock,
-  options: NativeCodexHttpOptions,
-  signal?: AbortSignal,
-): Promise<ResolvedToolResultPart> {
-  const content: ResolvedContentPart[] = []
-  for (const part of block.content) {
-    throwIfAborted(signal)
-    if (part.type === 'text') content.push(part)
-    else if (part.type === 'image') content.push(await resolveImage(part, options, signal))
-    else {
-      throw fixedFailure('native Codex tool output contains an unsupported content block', 'UNSUPPORTED')
-    }
-  }
-  return {
-    type: 'tool-result',
-    toolCallId: block.toolCallId,
-    content,
-    ...block.isError === undefined ? {} : { isError: block.isError },
-  }
-}
+
 
 async function resolveMessages(
   generation: GenerateOptions,
@@ -226,6 +205,24 @@ async function resolveMessages(
 ): Promise<ResolvedMessage[]> {
   const messages: ResolvedMessage[] = []
   for (const message of generation.messages) {
+    if (message.role === 'tool') {
+      const content: ResolvedContentPart[] = []
+      for (const block of message.content) {
+        throwIfAborted(generation.signal)
+        if (block.type === 'text') content.push(block)
+        else if (block.type === 'image') content.push(await resolveImage(block, options, generation.signal))
+        else {
+          throw fixedFailure('native Codex tool output contains an unsupported content block', 'UNSUPPORTED')
+        }
+      }
+      messages.push({
+        role: 'tool',
+        content,
+        toolCallId: message.toolCallId,
+        ...message.isError !== undefined ? { isError: message.isError } : {},
+      })
+      continue
+    }
     const content: ResolvedContentPart[] = []
     const source = message.source
     const sourceKind: unknown = (source as { kind?: unknown } | undefined)?.kind
@@ -257,12 +254,6 @@ async function resolveMessages(
           // A settlement copies the child's assistant output into user-role context.
           // Its tool calls belong to the child and must not become parent wire calls.
           break
-        case 'tool-result':
-          if (message.role !== 'user') {
-            throw fixedFailure('native Codex tool results require user messages', 'INVALID_ARGS')
-          }
-          content.push(await resolveToolResult(block, options, generation.signal))
-          break
         default:
           throw fixedFailure('native Codex request contains an unsupported content block', 'UNSUPPORTED')
       }
@@ -271,6 +262,7 @@ async function resolveMessages(
       && source.replayState !== undefined && hasNativeCodexReplayKind(source.replayState)
       ? { provider: source.provider, model: source.model, replayState: source.replayState }
       : undefined
+    // Developer messages are preserved for the Responses API
     messages.push({
       role: message.role,
       content,

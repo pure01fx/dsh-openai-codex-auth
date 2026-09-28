@@ -70,6 +70,23 @@ afterEach(() => {
 })
 
 describe('NativeCodexHttpTransport', () => {
+  it('preserves source-less developer and user messages on the HTTP wire', async () => {
+    const sent: unknown[] = []
+    const transport = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: async (_input, init) => { sent.push(JSON.parse(String(init?.body))); return successResponse() },
+    })
+    await collect(transport.stream(request({ messages: [
+      { role: 'developer', content: [{ type: 'text', text: 'Keep the required instruction.' }] },
+      { role: 'user', content: [{ type: 'text', text: 'Visible request.' }] },
+    ] })))
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ input: [
+      { role: 'developer', content: [{ type: 'input_text', text: 'Keep the required instruction.' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'Visible request.' }] },
+    ] })
+  })
+
   it('sends large UTF-8 context intact through HTTP', async () => {
     const text = '图'.repeat(9 * 1024 * 1024)
     const generation = request({ messages: [{
@@ -492,11 +509,9 @@ describe('NativeCodexHttpTransport', () => {
           { role: 'assistant', content: [{
             type: 'tool-call', id: 'call_synthetic', name: 'lookup', arguments: '{"key":"safe"}',
           }] },
-          { role: 'user', content: [{
-            type: 'tool-result', toolCallId: 'call_synthetic', content: [
-              { type: 'text', text: 'found' },
-            ],
-          }] },
+          { role: 'tool' as any, content: [
+            { type: 'text', text: 'found' },
+          ], toolCallId: 'call_synthetic', isError: false },
         ] as unknown as GenerateOptions['messages'],
       })))
       expect(chunks).toEqual([
@@ -780,11 +795,10 @@ describe('NativeCodexHttpTransport', () => {
           },
         },
         {
-          role: 'user',
-          content: [{
-            type: 'tool-result', toolCallId: 'call_redacted',
-            content: [{ type: 'text', text: 'found' }],
-          }],
+          role: 'tool' as any,
+          content: [{ type: 'text', text: 'found' }],
+          toolCallId: 'call_redacted',
+          isError: false,
           source: { kind: 'tool', callId: 'call_redacted' },
         },
       ] as unknown as GenerateOptions['messages'],

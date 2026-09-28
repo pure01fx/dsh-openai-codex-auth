@@ -30,17 +30,14 @@ function uuidBytes(value: string): Buffer { return Buffer.from(value.replaceAll(
 
 export type CodexImageDetail = 'auto' | 'low' | 'high' | 'original'
 export interface ResolvedImagePart { type: 'image'; mediaType: string; dataBase64: string; detail?: CodexImageDetail }
-export interface ResolvedToolResultPart {
-  type: 'tool-result'
-  toolCallId: ToolCallId
-  content: readonly ResolvedContentPart[]
-  isError?: boolean
-}
-export type ResolvedContentPart = Exclude<ContentBlock, { type: 'image' | 'tool-result' }>
-  | ResolvedImagePart | ResolvedToolResultPart
+
+export type ResolvedContentPart = Exclude<ContentBlock, { type: 'image' }>
+  | ResolvedImagePart
 export interface ResolvedMessage {
-  role: 'system' | 'user' | 'assistant'
+  role: 'system' | 'user' | 'assistant' | 'tool' | 'developer'
   content: readonly ResolvedContentPart[]
+  toolCallId?: ToolCallId
+  isError?: boolean
   replaySource?: NativeCodexReplaySource
 }
 export interface ResponsesRequestInput { instructions?: string; input: Record<string, unknown>[] }
@@ -58,12 +55,12 @@ function imageItem(image: ResolvedImagePart): Record<string, unknown> {
     ...image.detail === undefined ? {} : { detail: image.detail } }
 }
 
-function toolOutput(block: ResolvedToolResultPart): string | Record<string, unknown>[] {
-  const images = block.content.some(part => part.type === 'image')
+function toolOutput(content: readonly ResolvedContentPart[]): string | Record<string, unknown>[] {
+  const images = content.some(part => part.type === 'image')
   if (!images) {
-    return block.content.map(part => part.type === 'text' ? part.text : '').join('')
+    return content.map(part => part.type === 'text' ? part.text : '').join('')
   }
-  return block.content.map((part) => {
+  return content.map((part) => {
     if (part.type === 'text') return { type: 'input_text', text: part.text }
     if (part.type === 'image' && 'dataBase64' in part) return imageItem(part)
     throw fixedError('native Codex tool output contains an unsupported content block', 'UNSUPPORTED')
@@ -103,6 +100,29 @@ export function toResponsesInput(
       input.push({ type: 'message', role: message.role, content })
       content = []
     }
+    // Handle tool messages separately - they have no content blocks, just top-level fields
+    if (message.role === 'tool') {
+      if (message.toolCallId === undefined) {
+        throw fixedError('native Codex tool message requires toolCallId', 'INVALID_ARGS')
+      }
+      input.push({
+        type: 'function_call_output',
+        call_id: String(message.toolCallId),
+        output: toolOutput(message.content),
+        ...message.isError === true ? { is_error: true } : {},
+      })
+      continue
+    }
+    // Handle developer messages - map to developer role in Responses API
+    if (message.role === 'developer') {
+      for (const block of message.content) {
+        if (block.type === 'text') {
+          content.push({ type: 'input_text', text: block.text })
+        }
+      }
+      flush()
+      continue
+    }
     for (const block of message.content) {
       if (message.role === 'system') {
         if (block.type === 'text') systemTexts.push(block.text)
@@ -124,16 +144,13 @@ export function toResponsesInput(
           content.push(imageItem(block))
           break
         case 'tool-call':
+          if (message.role !== 'assistant') {
+            throw fixedError('native Codex tool calls require assistant messages', 'INVALID_ARGS')
+          }
           flush()
           input.push({
             type: 'function_call', call_id: String(block.id),
             name: block.name, arguments: block.arguments,
-          })
-          break
-        case 'tool-result':
-          flush()
-          input.push({
-            type: 'function_call_output', call_id: String(block.toolCallId), output: toolOutput(block),
           })
           break
         case 'reasoning':

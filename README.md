@@ -17,7 +17,7 @@
 
 ## 快速开始
 
-版本 `0.11.1` 明确适配 DeepSeek Harness `0.1.5-rc.1`，SDK peers/runtime helpers 精确锁定该版本；不声明兼容旧 SDK。旧 DSH `0.1.1-rc.2` profile 应保留原插件 `0.10.0`，升级时在独立 profile 安装新版插件并保留原 profile/锁文件以便回滚。无需迁移账号文件或浏览器隐藏列表；`dsh.engines` 仅作兼容性说明，不当作宿主硬门禁。
+版本 `0.12.0` 明确适配 DeepSeek Harness `0.1.7-rc.2`，SDK peers/runtime helpers 精确锁定该版本；不声明兼容旧 SDK。旧 DSH `0.1.5-rc.1` profile 应保留原插件 `0.11.2`，升级时在独立 profile 安装新版插件并保留原 profile/锁文件以便回滚。无需迁移账号文件或浏览器隐藏列表；`dsh.engines` 仅作兼容性说明，不当作宿主硬门禁。
 
 本版本通过真实目标 LLM/tools 服务与本地 HTTP/SSE/WebSocket 回放、错误/取消回归；模型隐藏覆盖真实目录/catalog/store 的投影更新、重连和重新加载。验证命令为 `pnpm typecheck && pnpm build && pnpm test`；当前版本未执行线上 OAuth/付费模型验收。
 

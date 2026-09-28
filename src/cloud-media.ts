@@ -74,7 +74,7 @@ export async function resolveImageSources(value: ImageSelection, deps: MediaSour
 }
 export interface MediaOutputDependencies {
   fs: Pick<FileSystem, 'resolve' | 'processPath' | 'contains'>;
-  shell: Pick<ShellExecutor, 'resolve' | 'run' | 'sandboxMode'>;
+  shell: Pick<ShellExecutor, 'resolve' | 'execute' | 'sandboxMode'>;
   /** Resolve from the calling session with the public sandboxPolicy service. */
   policy: SandboxExecutionPolicy;
   attachments: Pick<AttachmentStore, 'validateImage' | 'saveImage'>;
@@ -104,11 +104,12 @@ export async function saveImageOutputs(response: ParsedImageResponse, deps: Medi
     const target = await deps.fs.resolve('.dsh/codex-images/' + name, { cwd: deps.workspace, ...(deps.signal ? { signal: deps.signal } : {}) });
     if (!deps.fs.contains(workspace, target)) throw new Error('Original image target escapes caller workspace');
     const path = deps.fs.processPath(target);
-    const outcome = await deps.shell.run(deps.shell.resolve({
+    const execution = await deps.shell.execute(deps.shell.resolve({
       command: 'node -e ' + quote(WRITE_ORIGINAL) + ' -- ' + quote(path),
       stdin: Buffer.from(image.data).toString('base64'), workdir: deps.fs.processPath(workspace),
       sandboxPolicy: deps.policy, signal: deps.signal, timeoutMs: 30_000, stdoutMaxBytes: 1024,
     }));
+    const outcome = await execution.result();
     if (outcome.sandbox?.denied || outcome.sandbox?.runnerFailed || outcome.exitCode !== 0 || outcome.aborted || outcome.timedOut) throw new Error('Original image write failed under caller filesystem policy');
     const attachment = await deps.attachments.saveImage({ data: image.data, mediaType: image.mediaType, name });
     images.push({ ...image.metadata, path, mediaType: image.mediaType, bytes: image.data.length,

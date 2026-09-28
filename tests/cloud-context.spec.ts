@@ -26,6 +26,14 @@ describe('cloud model selection',()=>{
   })
 })
 describe('caller-visible cloud context',()=>{
+  it('does not grant images when first-class call identity disagrees with result source', () => {
+    const callId = ToolCallId('saved')
+    const call = createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'tool-call', id: callId, name: 'read_image', arguments: '{}' }] })
+    const result = createToolResultMessage({ callId, content: [image('must-not-be-visible')], isError: false })
+    expect(visibleCloudImages([call, { ...result, toolCallId: ToolCallId('other') }])).toEqual([])
+    expect(visibleCloudImages([call, result]).map(value => value.attachmentId)).toEqual(['must-not-be-visible'])
+  })
+
   it('keeps only last two human texts and visible assistant text in order',()=>{
     const messages=[user('old'),assistant('old answer'),user('first'),createUserMessage({source:{kind:'plugin',plugin:'private'},content:[{type:'text',text:'secret system'}]}),assistant('answer'),user('second'),createToolResultMessage({callId:ToolCallId('hidden'),content:[{type:'text',text:'secret tool'}],isError:false})]
     expect(recentSearchInput(messages)).toEqual([{role:'user',content:'first'},{role:'assistant',content:'answer'},{role:'user',content:'second'}])

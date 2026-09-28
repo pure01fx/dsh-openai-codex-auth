@@ -1,6 +1,6 @@
 /** Caller-visible context only; never project reasoning, plugin instructions or replay state. */
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { LlmError, type ContentBlock, type Message } from '@deepseek-ai/dsh-llm'
+import { LlmError, type Message } from '@deepseek-ai/dsh-llm'
 import type { NativeCodexModel } from './catalog.js'
 
 export function chooseCloudModel(params: { requested?: string | undefined; configured?: string | undefined; currentProvider?: string | undefined; currentModel?: string | undefined; purpose: 'search' | 'vision' }, models: readonly NativeCodexModel[]): NativeCodexModel {
@@ -16,21 +16,19 @@ export function chooseCloudModel(params: { requested?: string | undefined; confi
 export function visibleCloudImages(messages: readonly Message[]): ImageAttachmentRef[] {
   const images: ImageAttachmentRef[] = []
   const calls = new Set<string>()
-  const visit = (blocks: readonly ContentBlock[], depth = 0): void => {
-    if (depth > 16) return
-    for (const block of blocks) {
-      if (block.type === 'image') images.push(block.attachment)
-      else if (block.type === 'tool-result' && !block.isError && calls.has(block.toolCallId)) visit(block.content, depth + 1)
-    }
-  }
+
   for (const message of messages) {
     if (message.role === 'assistant') {
       for (const block of message.content) if (block.type === 'tool-call') calls.add(block.id)
     } else if (message.role === 'user' && message.source.kind === 'user') {
       // User messages grant only their direct images, never embedded purported tool results.
       for (const block of message.content) if (block.type === 'image') images.push(block.attachment)
-    } else if (message.role === 'user' && message.source.kind === 'tool' && calls.has(message.source.callId)) {
-      for (const block of message.content) if (block.type === 'tool-result' && block.toolCallId === message.source.callId && !block.isError) visit(block.content)
+    } else if (message.role === 'tool' && message.source.kind === 'tool') {
+      // Require successful result with matching callId and earlier matching call
+      if (message.isError || message.toolCallId !== message.source.callId) continue
+      if (!calls.has(message.source.callId)) continue
+      // Tool messages with images in their content
+      for (const block of message.content) if (block.type === 'image') images.push(block.attachment)
     }
   }
   return images

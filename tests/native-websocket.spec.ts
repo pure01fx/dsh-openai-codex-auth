@@ -110,6 +110,26 @@ function finishState(chunks: StreamChunk[]): unknown {
 }
 
 describe('NativeCodexWebSocketTransport', () => {
+  it('preserves source-less developer and user messages on the WebSocket wire', async () => {
+    const scripted = socket([completed('warm'), ...textResponse('answer', 'item', 'ok')])
+    const fallback = vi.fn(async () => response())
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL, webSocketFactory: new ScriptedFactory([scripted]), fetch: fallback,
+    })
+    try {
+      await collect(transport.stream({ ...firstRequest(), messages: [
+        { role: 'developer', content: [{ type: 'text', text: 'Keep the required instruction.' }] },
+        { role: 'user', content: [{ type: 'text', text: 'Visible request.' }] },
+      ] }))
+      expect(scripted.sent).toHaveLength(2)
+      expect(JSON.parse(scripted.sent[0]!)).toMatchObject({ input: [
+        { role: 'developer', content: [{ type: 'input_text', text: 'Keep the required instruction.' }] },
+        { role: 'user', content: [{ type: 'input_text', text: 'Visible request.' }] },
+      ] })
+      expect(fallback).not.toHaveBeenCalled()
+    } finally { transport.dispose() }
+  })
+
   it.each(['incremental', 'changed-model', 'reconnect', 'http-fallback'] as const)(
     'preserves image context across transport paths: %s', async (scenario) => {
       const answer = '长'.repeat(1000)

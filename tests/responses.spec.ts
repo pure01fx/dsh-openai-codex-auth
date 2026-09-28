@@ -64,13 +64,10 @@ describe('Responses request translation', () => {
         { type: 'reasoning', text: 'must not replay' },
         { type: 'tool-call', id: ToolCallId(longId), name: 'lookup', arguments: '{"key":"safe"}' },
       ] },
-      { role: 'user', content: [{
-        type: 'tool-result', toolCallId: ToolCallId(longId), isError: false,
-        content: [
-          { type: 'text', text: 'found' },
-          { type: 'image', mediaType: 'image/jpeg', dataBase64: 'anBn' },
-        ],
-      }] },
+      { role: 'tool', content: [
+        { type: 'text', text: 'found' },
+        { type: 'image', mediaType: 'image/jpeg', dataBase64: 'anBn' },
+      ], toolCallId: ToolCallId(longId), isError: false } as any,
     ]
     const body = codexRequestBody(options({
       system: 'explicit system',
@@ -111,6 +108,18 @@ describe('Responses request translation', () => {
       include: ['reasoning.encrypted_content'],
       prompt_cache_key: 'session-fixed',
     })
+  })
+
+  it('maps developer messages to developer role in Responses API', () => {
+    const messages: ResolvedMessage[] = [
+      { role: 'developer', content: [{ type: 'text', text: 'tool addition: lookup' }] },
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ]
+    const body = codexRequestBody(options(), messages)
+    expect(body.input).toEqual([
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'tool addition: lookup' }] },
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+    ])
   })
 
   it('uses message systems only as fallback and otherwise supplies Codex defaults', () => {

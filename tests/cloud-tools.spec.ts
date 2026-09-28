@@ -30,10 +30,11 @@ async function harness(options:{services?:boolean;config?:any}={}){
     new LocalAttachmentStore(ctx,{dshHome:root})
     ctx.provide('fs',{resolve:async(p:string,o:any)=>resolve(o?.cwd??root,p),processPath:(p:string)=>p,contains:(a:string,b:string)=>!relative(a,b).startsWith('..'),readBytes:async(p:string)=>readFile(p)} as never)
     ctx.provide('sandboxPolicy',{resolve:()=>policy} as never)
-    ctx.provide('shell',{sandboxMode:'workspace-write',resolve:(x:any)=>x,run:async(x:any)=>{
+    ctx.provide('shell',{sandboxMode:'workspace-write',resolve:(x:any)=>x,execute:async(x:any)=>{
       expect(x.sandboxPolicy).toBe(policy)
       // This integration verifies policy forwarding; real enforcement is a separate oracle.
-      return new Promise((res,rej)=>{const child=execFile('bash',['-c',x.command],{cwd:x.workdir},err=>err?rej(err):res({exitCode:0}));child.stdin!.end(x.stdin)})
+      const result = await new Promise<any>((res,rej)=>{const child=execFile('bash',['-c',x.command],{cwd:x.workdir},err=>err?rej(err):res({exitCode:0}));child.stdin!.end(x.stdin)});
+      return {result:async()=>result};
     }} as never)
     ctx.provide('llm',{resolveModelInfo:async()=>model} as never)
   }
