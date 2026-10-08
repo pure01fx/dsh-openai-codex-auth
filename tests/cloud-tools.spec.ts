@@ -80,7 +80,7 @@ describe('registered image tools',()=>{
     expect(h.posts.map(x=>x.url.split('/').pop())).toEqual(['generations','edits','responses'])
     expect(h.posts[1].body.images[0].image_url).toBe('data:image/png;base64,'+h.raw.toString('base64'))
     expect(h.posts[2].body.tools).toBeUndefined()
-    expect(h.posts[2].body.input[0].content[1].detail).toBe('original')
+    expect(h.posts[2].body.input.find((item: { role?: string }) => item.role === 'user').content[1].detail).toBe('original')
   })
   it('reuses successful same-program images before history is materialized',async()=>{
     const h=await harness()

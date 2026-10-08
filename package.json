@@ -53,6 +53,8 @@
     "lib/responses.d.ts",
     "lib/replay.js",
     "lib/replay.d.ts",
+    "lib/retry-after.js",
+    "lib/retry-after.d.ts",
     "lib/rate-limits.js",
     "lib/rate-limits.d.ts",
     "lib/response-usage.js",

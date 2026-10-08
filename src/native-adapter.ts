@@ -83,7 +83,8 @@ function responsesLiteMode(
 ): Pick<NativeCodexTransportMode, 'responsesLite'> {
   if (model !== undefined && !model.useResponsesLite) return {}
   // Never downgrade known Lite-only slugs to Standard Responses during catalog outages.
-  if (model === undefined && requestedModel !== 'gpt-6-astra' && requestedModel !== 'gpt-6-sol') return {}
+  if (model === undefined && requestedModel !== 'gpt-6-astra'
+    && requestedModel !== 'gpt-6-sol' && requestedModel !== 'gpt-6.1-sol') return {}
   return {
     responsesLite: {
       defaultVerbosity: model?.defaultVerbosity ?? 'low',

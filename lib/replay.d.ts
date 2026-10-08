@@ -2,10 +2,13 @@
 import { type ContentBlock } from '@deepseek-ai/dsh-llm';
 export declare const NATIVE_CODEX_REPLAY_KIND = "openai-codex-native.responses-replay";
 export declare const NATIVE_CODEX_REPLAY_VERSION = 1;
+export type CodexMessagePhase = 'commentary' | 'partial_answer' | 'final_answer';
+export declare function isCodexMessagePhase(value: unknown): value is CodexMessagePhase;
 export type NativeCodexReplayDescriptor = {
     type: 'message';
     id?: string;
     blocks: number[];
+    phase?: CodexMessagePhase;
 } | {
     type: 'reasoning';
     id?: string;

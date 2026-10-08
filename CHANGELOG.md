@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Shares Retry-After parsing across HTTP, SSE, and WebSocket errors, including nested JSON headers and HTTP dates; preserves server deadlines across retries and HTTP fallback without truncating advice to local backoff limits.
+
+- Preserves commentary, partial_answer, and final_answer phases through response events, durable replay, and WebSocket continuation matching; legacy phase-less replay remains readable.
+
+- Moves Standard base instructions into the same deterministic developer-message prefix used by Lite, preserving each protocol’s tool and reasoning controls; changed instructions invalidate WebSocket prefix reuse.
+
+- Requests the live model catalog as Codex 0.162.0 to discover GPT-6.1 Sol; verified that 0.155.0 omits it for the same account despite the bundled 0.153.0 minimum. Adds its exact Lite fallback and dynamic metadata/routing regressions without fabricating catalog availability.
+
 ## 0.11.2
 
 - Requests the live model catalog as Codex 0.155.0 so version-gated GPT-6 Sol can be advertised; preserves dynamic account-specific discovery and routes exact Sol requests through Responses Lite when catalog metadata is unavailable. Fast remains catalog-authorized.

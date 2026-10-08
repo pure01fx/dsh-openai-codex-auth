@@ -6,8 +6,11 @@ import {
   type ContentBlock, type GenerateOptions, type StreamChunk, type TokenUsage, type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse, type ParseSseOptions } from './sse.js'
+import { jsonRetryAfterMs, retryError } from './retry-after.js'
 import {
   NativeCodexReplayCapture,
+  isCodexMessagePhase,
+  type CodexMessagePhase,
   replayAssistantInput,
   replayableItemId,
   type NativeCodexReplaySource,
@@ -234,11 +237,23 @@ export function codexRequestBody(
     ...mode.serviceTier === undefined ? {} : { service_tier: mode.serviceTier },
     ...options.sessionId === undefined ? {} : { prompt_cache_key: String(options.sessionId) },
   }
+  const baseInstructions = mode.responsesLite?.instructionsTemplate ?? instructions
+  const prefixNamespace = uuidBytes(uuidV5(
+    UUID_NAMESPACE_OID, String(options.sessionId ?? options.model),
+  ))
+  const instructionPrefix = baseInstructions.length === 0 ? [] : [{
+    type: 'message',
+    id: `msg_${uuidV5(prefixNamespace, baseInstructions)}`,
+    role: 'developer',
+    content: [{ type: 'input_text', text: baseInstructions }],
+    internal_chat_message_metadata_passthrough: {
+      content_item_kinds: ['model.base_instructions'],
+    },
+  }]
   if (mode.responsesLite === undefined) {
     return {
       ...common,
-      instructions,
-      input,
+      input: [...instructionPrefix, ...input],
       ...options.tools !== undefined && options.tools.length > 0
         ? { tools: toResponsesTools(options.tools) } : {},
       parallel_tool_calls: true,
@@ -248,7 +263,6 @@ export function codexRequestBody(
   }
 
   const tools = toResponsesLiteTools(options.tools ?? [])
-  const baseInstructions = mode.responsesLite.instructionsTemplate ?? instructions
   const contextualInstructions = mode.responsesLite.instructionsTemplate !== undefined
       && resolved.instructions !== undefined && resolved.instructions !== baseInstructions
     ? [{
@@ -256,23 +270,12 @@ export function codexRequestBody(
         content: [{ type: 'input_text', text: resolved.instructions }],
       }]
     : []
-  const prefixNamespace = uuidBytes(uuidV5(
-    UUID_NAMESPACE_OID, String(options.sessionId ?? options.model),
-  ))
   const prefix = [{
     type: 'additional_tools',
     id: `at_${uuidV5(prefixNamespace, JSON.stringify(tools))}`,
     role: 'developer',
     tools,
-  }, {
-    type: 'message',
-    id: `msg_${uuidV5(prefixNamespace, baseInstructions)}`,
-    role: 'developer',
-    content: [{ type: 'input_text', text: baseInstructions }],
-    internal_chat_message_metadata_passthrough: {
-      content_item_kinds: ['model.base_instructions'],
-    },
-  }]
+  }, ...instructionPrefix]
   return {
     ...common,
     input: [...prefix, ...contextualInstructions, ...input],
@@ -326,11 +329,12 @@ function retryDelay(message?: string): number | undefined {
   if (match === null || match === undefined) return undefined
   const value = Number(match[1])
   if (!Number.isFinite(value) || value <= 0) return undefined
-  return Math.min(match[2]?.toLowerCase() === 'ms' ? value : value * 1000, 600_000)
+  const delay = match[2]?.toLowerCase() === 'ms' ? value : value * 1000
+  return Number.isFinite(delay) && delay <= Number.MAX_SAFE_INTEGER ? delay : undefined
 }
 
 /** Classify in-band failure data without reflecting provider text. */
-export function responsesFailure(code?: string, message?: string): LlmError {
+export function responsesFailure(code?: string, message?: string, headers?: unknown): LlmError {
   const detail = `${code ?? ''} ${message ?? ''}`
   if (code === 'context_length_exceeded' || code === 'context_window_exceeded'
     || isContextWindowExceededError(detail)) {
@@ -342,8 +346,8 @@ export function responsesFailure(code?: string, message?: string): LlmError {
     return fixedError('native Codex account quota is exhausted', QUOTA_EXCEEDED_CODE)
   }
   if (code === 'rate_limit_exceeded' || code === 'slow_down') {
-    const delay = retryDelay(message)
-    return new LlmError('native Codex request was rate limited', 'RATE_LIMIT', {
+    const delay = jsonRetryAfterMs(headers) ?? retryDelay(message)
+    return retryError('native Codex request was rate limited', 'RATE_LIMIT', {
       ...delay === undefined ? {} : { providerRetryAfterMs: delay },
     })
   }
@@ -353,12 +357,15 @@ export function responsesFailure(code?: string, message?: string): LlmError {
   if (code === 'bio_policy') {
     return fixedError('native Codex rejected the request', 'INVALID_REQUEST')
   }
-  return fixedError('native Codex reported a failed response', 'SERVER')
+  const delay = jsonRetryAfterMs(headers)
+  return retryError('native Codex reported a failed response', 'SERVER', {
+    ...delay === undefined ? {} : { providerRetryAfterMs: delay },
+  })
 }
 
 interface ResponsesOutputItem {
   type?: string; id?: string; call_id?: string; name?: string; namespace?: string; arguments?: string
-  encrypted_content?: string; summary?: unknown[]; status?: string
+  encrypted_content?: string; summary?: unknown[]; status?: string; phase?: CodexMessagePhase | null
   content?: Array<{ type?: string; text?: string }>
 }
 export interface ResponsesStreamEvent {
@@ -368,7 +375,7 @@ export interface ResponsesStreamEvent {
   item?: ResponsesOutputItem
   response?: {
     status?: string; usage?: ResponsesUsage
-    error?: { code?: string; message?: string }
+    error?: { code?: string; message?: string; headers?: unknown }
     incomplete_details?: { reason?: string }
   }
   code?: string; message?: string
@@ -398,6 +405,7 @@ export interface ResponsesReplayContext { provider: string; model: string }
 export class ResponsesStreamTranslator {
   private readonly blocks = new Map<string, OpenBlock>()
   private readonly order: OpenBlock[] = []
+  private readonly messagePhases = new Map<string, CodexMessagePhase>()
   private readonly replayCapture: NativeCodexReplayCapture | undefined
   private nextIndex = 0
   private sawToolCall = false
@@ -407,6 +415,19 @@ export class ResponsesStreamTranslator {
     this.replayCapture = replayContext === undefined
       ? undefined
       : new NativeCodexReplayCapture(replayContext.provider, replayContext.model)
+  }
+
+  /** The same effective phase feeds durable replay and WebSocket prefix comparison. */
+  messagePhase(id: string): CodexMessagePhase | undefined {
+    return this.messagePhases.get(id)
+  }
+
+  private captureMessagePhase(item: ResponsesOutputItem): void {
+    if (item.phase === undefined || item.phase === null) return
+    if (!isCodexMessagePhase(item.phase) || typeof item.id !== 'string' || item.id.length === 0) {
+      throw fixedError('native Codex message phase is invalid', 'MALFORMED_RESPONSE')
+    }
+    this.messagePhases.set(item.id, item.phase)
   }
 
   private append(block: OpenBlock, delta: string): void {
@@ -452,6 +473,7 @@ export class ResponsesStreamTranslator {
     switch (event.type) {
       case 'response.output_item.added': {
         const item = event.item
+        if (item?.type === 'message') this.captureMessagePhase(item)
         if (item?.type !== 'function_call') return chunks
         if (item.id === undefined || item.id.length === 0
           || item.call_id === undefined || item.call_id.length === 0
@@ -531,6 +553,8 @@ export class ResponsesStreamTranslator {
             block: block.index,
           })
         } else if (item.type === 'message') {
+          this.captureMessagePhase(item)
+          const phase = this.messagePhase(item.id)
           if (!Array.isArray(item.content)) {
             throw fixedError('native Codex message item has invalid content', 'MALFORMED_RESPONSE')
           }
@@ -555,6 +579,7 @@ export class ResponsesStreamTranslator {
           )) throw fixedError('native Codex message item has unmatched text', 'MALFORMED_RESPONSE')
           if (this.replayContext !== undefined) this.replayCapture?.add({
             type: 'message', ...(replayId === undefined ? {} : { id: replayId }), blocks: refs,
+            ...(phase === undefined ? {} : { phase }),
           })
         } else if (item.type === 'reasoning') {
           if (!Array.isArray(item.summary)) {
@@ -641,7 +666,7 @@ export class ResponsesStreamTranslator {
         return chunks
       }
       case 'response.failed':
-        throw responsesFailure(event.response?.error?.code, event.response?.error?.message)
+        throw responsesFailure(event.response?.error?.code, event.response?.error?.message, event.response?.error?.headers)
       case 'error':
         throw responsesFailure(event.code, event.message)
       default:

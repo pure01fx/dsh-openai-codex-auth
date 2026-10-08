@@ -335,8 +335,8 @@ describe('NativeCodexAdapter catalog boundary', () => {
     expect(fallbackMode).toEqual({ responsesLite: { defaultVerbosity: 'low' } })
   })
 
-  it('lists Sol dynamically and routes using current catalog metadata', async () => {
-    const fixture = JSON.parse(await readFile(new URL('./fixtures/codex-sol-model.json', import.meta.url), 'utf8'))
+  it.each(['codex-sol-model.json', 'codex-sol-6.1-model.json'])('lists Sol dynamically and routes using current catalog metadata (%s)', async filename => {
+    const fixture = JSON.parse(await readFile(new URL(`./fixtures/${filename}`, import.meta.url), 'utf8'))
     const row = fixture.models[0]
     let now = 0
     const catalog = new NativeCodexCatalog({
@@ -351,28 +351,28 @@ describe('NativeCodexAdapter catalog boundary', () => {
       yield { type: 'finish', reason: { kind: 'stop' } }
     } })
     await expect(adapter.listModels(NATIVE_CODEX_PROVIDER)).resolves.toEqual([
-      { provider: NATIVE_CODEX_PROVIDER, id: 'gpt-6-sol', name: 'GPT-6-Sol', inputModalities: ['text', 'image'] },
+      { provider: NATIVE_CODEX_PROVIDER, id: row.slug, name: row.display_name, inputModalities: ['text', 'image'] },
     ])
-    await collect(adapter.stream({ ...request(), model: 'gpt-6-sol' }))
-    await expect(collect(adapter.stream({ ...request(), model: 'gpt-6-sol-fast' })))
+    await collect(adapter.stream({ ...request(), model: row.slug }))
+    await expect(collect(adapter.stream({ ...request(), model: `${row.slug}-fast` })))
       .rejects.toMatchObject({ code: 'FAST_UNSUPPORTED' })
     row.additional_speed_tiers = ['fast']
     row.default_verbosity = 'high'
     row.model_messages = { instructions_template: 'Short test instructions' }
     await expect(adapter.listModels(NATIVE_CODEX_PROVIDER)).resolves.toHaveLength(2)
-    await collect(adapter.stream({ ...request(), model: 'gpt-6-sol-fast' }))
+    await collect(adapter.stream({ ...request(), model: `${row.slug}-fast` }))
     row.use_responses_lite = false
-    await collect(adapter.stream({ ...request(), model: 'gpt-6-sol' }))
+    await collect(adapter.stream({ ...request(), model: row.slug }))
     delete row.use_responses_lite
-    await collect(adapter.stream({ ...request(), model: 'gpt-6-sol' }))
+    await collect(adapter.stream({ ...request(), model: row.slug }))
     expect(seen).toEqual([
-      { model: 'gpt-6-sol', mode: { responsesLite: { defaultVerbosity: 'low' } } },
-      { model: 'gpt-6-sol', mode: {
-        serviceTier: 'priority', publicModel: 'gpt-6-sol-fast', authorityHash: expect.any(String),
+      { model: row.slug, mode: { responsesLite: { defaultVerbosity: 'low' } } },
+      { model: row.slug, mode: {
+        serviceTier: 'priority', publicModel: `${row.slug}-fast`, authorityHash: expect.any(String),
         responsesLite: { defaultVerbosity: 'high', instructionsTemplate: 'Short test instructions' },
       } },
-      { model: 'gpt-6-sol', mode: {} },
-      { model: 'gpt-6-sol', mode: {} },
+      { model: row.slug, mode: {} },
+      { model: row.slug, mode: {} },
     ])
   })
 
@@ -383,14 +383,15 @@ describe('NativeCodexAdapter catalog boundary', () => {
         seen.push(mode)
         yield { type: 'finish', reason: { kind: 'stop' } }
       } })
-      for (const model of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-sol-preview', 'gpt-6-unknown']) {
+      for (const model of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-sol-preview', 'gpt-6.1-sol-preview', 'gpt-6-unknown']) {
         await collect(adapter.stream({ ...request(), model }))
       }
       await expect(collect(adapter.stream({ ...request(), model: 'gpt-6-sol-fast' })))
         .rejects.toMatchObject({ code: 'FAST_UNSUPPORTED' })
       expect(seen).toEqual([
         { responsesLite: { defaultVerbosity: 'low' } },
-        { responsesLite: { defaultVerbosity: 'low' } }, {}, {},
+        { responsesLite: { defaultVerbosity: 'low' } },
+        { responsesLite: { defaultVerbosity: 'low' } }, {}, {}, {},
       ])
     },
   )

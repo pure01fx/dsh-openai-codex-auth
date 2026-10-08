@@ -24,6 +24,23 @@ function response(body = FIXTURE, init: ResponseInit = {}): Response {
 }
 
 describe('NativeCodexCatalog', () => {
+  it('discovers GPT-6.1 Sol with the observed live version gate, independently of bundled minima', async () => {
+    const fixture = JSON.parse(await readFile(new URL('./fixtures/codex-sol-6.1-model.json', import.meta.url), 'utf8'))
+    const options = {
+      resolveCredential: async () => CREDENTIAL,
+      fetch: vi.fn(async (input: RequestInfo | URL) => {
+        const version = new URL(String(input)).searchParams.get('client_version')
+        // Observed backend behavior: the bundled 0.153.0 minimum does not advertise 6.1.
+        return response(JSON.stringify({ models: version === '0.162.0' ? fixture.models : [] }))
+      }) as typeof fetch,
+    }
+    await expect(new NativeCodexCatalog({ ...options, clientVersion: '0.155.0' }).list()).resolves.toEqual([])
+    await expect(new NativeCodexCatalog(options).list()).resolves.toEqual([expect.objectContaining({
+      slug: 'gpt-6.1-sol', useResponsesLite: true, defaultReasoningLevel: 'low',
+      multiAgentReasoningEffort: 'xhigh', supportedReasoningLevels: fixture.models[0].supported_reasoning_levels,
+    })])
+  })
+
   it('requests a version that passes the upstream Sol minimum filter', async () => {
     const fixture = JSON.parse(await readFile(new URL('./fixtures/codex-sol-model.json', import.meta.url), 'utf8'))
     const versions: string[] = []
@@ -46,7 +63,7 @@ describe('NativeCodexCatalog', () => {
         supportedReasoningLevels: fixture.models[0].supported_reasoning_levels,
       }),
     ])
-    expect(versions).toEqual(['0.153.4', '0.155.0'])
+    expect(versions).toEqual(['0.153.4', CODEX_CLIENT_VERSION])
   })
 
   it('rejects unsupported credential-bearing catalog authorities', () => {

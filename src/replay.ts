@@ -4,8 +4,14 @@ import { LlmError, type ContentBlock } from '@deepseek-ai/dsh-llm'
 export const NATIVE_CODEX_REPLAY_KIND = 'openai-codex-native.responses-replay'
 export const NATIVE_CODEX_REPLAY_VERSION = 1
 
+export type CodexMessagePhase = 'commentary' | 'partial_answer' | 'final_answer'
+
+export function isCodexMessagePhase(value: unknown): value is CodexMessagePhase {
+  return value === 'commentary' || value === 'partial_answer' || value === 'final_answer'
+}
+
 export type NativeCodexReplayDescriptor =
-  | { type: 'message'; id?: string; blocks: number[] }
+  | { type: 'message'; id?: string; blocks: number[]; phase?: CodexMessagePhase }
   | { type: 'reasoning'; id?: string; blocks: number[]; encryptedContent?: string }
   | { type: 'function_call'; id?: string; namespace?: string; block: number }
 
@@ -77,10 +83,12 @@ function parseDescriptor(value: unknown): NativeCodexReplayDescriptor {
   }
   if (row.type === 'message') {
     const blocks = validateBlockArray(row.blocks)
-    if (blocks === undefined || !onlyKeys(row, ['type', 'id', 'blocks'])) {
+    if (blocks === undefined || (row.phase !== undefined && !isCodexMessagePhase(row.phase))
+      || !onlyKeys(row, ['type', 'id', 'blocks', 'phase'])) {
       throw failure('native Codex message replay descriptor is invalid')
     }
-    return { type: 'message', ...(id === undefined ? {} : { id }), blocks }
+    return { type: 'message', ...(id === undefined ? {} : { id }), blocks,
+      ...(row.phase === undefined ? {} : { phase: row.phase as CodexMessagePhase }) }
   }
   if (row.type === 'reasoning') {
     const blocks = validateBlockArray(row.blocks)
@@ -213,6 +221,7 @@ export function replayAssistantInput(
       input.push({
         type: 'message', ...(item.id === undefined ? {} : { id: item.id }),
         role: 'assistant', content: parts,
+        ...(item.phase === undefined ? {} : { phase: item.phase }),
       })
     } else if (item.type === 'reasoning') {
       const summary = item.blocks.map((index) => {

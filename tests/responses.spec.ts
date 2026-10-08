@@ -14,6 +14,7 @@ import {
   type ResolvedMessage,
 } from '../src/responses.ts'
 import { parseSse } from '../src/sse.ts'
+import { NativeCodexWebSocketSessionState } from '../src/native-websocket-session.ts'
 
 const LF = String.fromCharCode(10)
 const CRLF = String.fromCharCode(13, 10)
@@ -50,6 +51,31 @@ function errorOf(run: () => unknown): { code?: string; message?: string; failure
 }
 
 describe('Responses request translation', () => {
+  it('shares stable base instructions across protocols and resets reuse when instructions change', () => {
+    const generation = options({ system: 'base', sessionId: 'thread-fixed' as GenerateOptions['sessionId'] })
+    const history: ResolvedMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }]
+    const first = codexRequestBody(generation, history)
+    const lite = codexRequestBody(generation, history, { responsesLite: {} })
+    const firstInput = first.input as Record<string, unknown>[]
+    expect(first).not.toHaveProperty('instructions')
+    expect((lite.input as unknown[])[1]).toEqual(firstInput[0])
+    const state = new NativeCodexWebSocketSessionState()
+    state.plan(first)
+    state.complete('resp_first', [])
+    const nextHistory: ResolvedMessage[] = [...history, { role: 'user', content: [{ type: 'text', text: 'next' }] }]
+    const next = codexRequestBody(generation, nextHistory)
+    const incremental = state.plan(next)
+    expect(incremental.incremental).toBe(true)
+    expect(incremental.payload.input).toEqual([{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }])
+    state.complete('resp_next', [])
+    const changed = codexRequestBody({ ...generation, system: 'changed base' }, [...nextHistory, ...history])
+    expect((changed.input as Record<string, unknown>[])[0]!.id).not.toBe(firstInput[0]!.id)
+    const full = state.plan(changed)
+    expect(full.incremental).toBe(false)
+    expect(full.payload).not.toHaveProperty('previous_response_id')
+    expect(full.payload.input).toEqual(changed.input)
+  })
+
   it('maps system, text, tools, images, reasoning, cache identity, and correlated call ids', () => {
     const longId = 'x'.repeat(80)
     const normalized = 'call_d929cdeea7e6a0f46b59448d36a6fd491df8647cf292040508162ee5f64'
@@ -83,8 +109,8 @@ describe('Responses request translation', () => {
 
     expect(body).toEqual({
       model: 'gpt-fixed',
-      instructions: 'explicit system',
       input: [
+        { type: 'message', id: expect.stringMatching(/^msg_[0-9a-f-]{36}$/), role: 'developer', content: [{ type: 'input_text', text: 'explicit system' }], internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] } },
         { type: 'message', role: 'user', content: [
           { type: 'input_text', text: 'inspect' },
           { type: 'input_image', image_url: 'data:image/png;base64,cG5n' },
@@ -114,12 +140,15 @@ describe('Responses request translation', () => {
   })
 
   it('uses message systems only as fallback and otherwise supplies Codex defaults', () => {
+    const empty = codexRequestBody(options({ system: '' }), [])
+    expect(empty).not.toHaveProperty('instructions')
+    expect(empty.input).toEqual([])
     expect(toResponsesInput([
       { role: 'system', content: [{ type: 'text', text: 'one' }] },
       { role: 'system', content: [{ type: 'text', text: 'two' }] },
     ])).toEqual({ instructions: `one${LF}${LF}two`, input: [] })
     expect(codexRequestBody(options(), [])).toEqual({
-      model: 'gpt-fixed', instructions: DEFAULT_CODEX_INSTRUCTIONS, input: [],
+      model: 'gpt-fixed', input: [{ type: 'message', id: expect.stringMatching(/^msg_[0-9a-f-]{36}$/), role: 'developer', content: [{ type: 'input_text', text: DEFAULT_CODEX_INSTRUCTIONS }], internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] } }],
       tool_choice: 'auto', parallel_tool_calls: true, store: false, stream: true,
       include: ['reasoning.encrypted_content'],
     })

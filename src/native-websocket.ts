@@ -1,5 +1,6 @@
 /** WebSocket v2 Responses transport with bounded session state and sticky HTTP fallback. */
 import { createHash } from 'node:crypto'
+import { retryError, remainingRetryDelay, sleepRetry, jsonRetryAfterMs } from './retry-after.js'
 import { networkTelemetry, trackNetwork, observeNetworkOutput, type NetworkRequestHandle } from './network-telemetry.js'
 import {
   LlmError,
@@ -79,7 +80,7 @@ interface SessionEntry {
 }
 
 function failure(message: string, code: string, cause?: unknown): LlmError {
-  return new LlmError(message, code, cause === undefined ? undefined : { cause })
+  return retryError(message, code, cause === undefined ? undefined : { cause })
 }
 
 function reconnectable(code: string): boolean {
@@ -96,9 +97,8 @@ function failedStepRetryable(code: string): boolean {
 
 function failedStepRetry(error: LlmError): LlmError {
   const facts = error.failure
-  const providerRetryAfterMs = facts.providerRetryAfterMs === undefined
-    ? undefined : Math.min(facts.providerRetryAfterMs, DEFAULT_MAX_RETRY_DELAY_MS)
-  return new LlmError(
+  const providerRetryAfterMs = facts.providerRetryAfterMs
+  return retryError(
     `native Codex response stream was interrupted: ${error.message}`,
     NATIVE_CODEX_STREAM_INTERRUPTED_CODE,
     {
@@ -134,26 +134,6 @@ function retryCount(value: number | undefined): number {
   return resolved
 }
 
-function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) {
-    return Promise.reject(failure('native Codex WebSocket retry wait was aborted', 'ABORTED'))
-  }
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(done, delayMs)
-    const abort = (): void => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', abort)
-      const reason = signal?.reason
-      reject(reason instanceof LlmError
-        ? reason : failure('native Codex WebSocket retry wait was aborted', 'ABORTED'))
-    }
-    function done(): void {
-      signal?.removeEventListener('abort', abort)
-      resolve()
-    }
-    signal?.addEventListener('abort', abort, { once: true })
-  })
-}
 
 function socketCredential(credential: NativeCodexCredential): string {
   return createHash('sha256')
@@ -196,14 +176,18 @@ function withRequestMetadata(
   }
 }
 
-function normalizedOutputItem(event: ResponsesStreamEvent): Record<string, unknown> | undefined {
+function normalizedOutputItem(
+  event: ResponsesStreamEvent, translator: ResponsesStreamTranslator,
+): Record<string, unknown> | undefined {
   if (event.type !== 'response.output_item.done' || event.item === undefined) return undefined
   const item = event.item
   const id = replayableItemId(item.id)
   if (item.type === 'message') {
+    const phase = item.id === undefined ? undefined : translator.messagePhase(item.id)
     return {
       type: 'message', ...(id === undefined ? {} : { id }), role: 'assistant',
       content: (item.content ?? []).map(part => ({ type: 'output_text', text: part.text })),
+      ...(phase === undefined ? {} : { phase }),
     }
   }
   if (item.type === 'reasoning') {
@@ -238,10 +222,9 @@ function eventErrorFacts(
   event: Record<string, unknown>, status: number | undefined,
 ): ConstructorParameters<typeof LlmError>[2] {
   const requestId = eventHeader(event, 'x-request-id')
-  const retryAfter = eventHeader(event, 'retry-after')
-  const seconds = retryAfter === undefined ? undefined : Number(retryAfter)
-  const retryMs = seconds !== undefined && Number.isFinite(seconds) && seconds > 0
-    ? Math.min(seconds * 1_000, 120_000) : undefined
+  const nested = typeof event.error === 'object' && event.error !== null
+    ? event.error as Record<string, unknown> : undefined
+  const retryMs = jsonRetryAfterMs(nested?.headers) ?? jsonRetryAfterMs(event.headers)
   return {
     ...(status === undefined ? {} : { status }),
     ...(retryMs === undefined ? {} : { providerRetryAfterMs: retryMs }),
@@ -261,28 +244,28 @@ function eventFailure(event: Record<string, unknown>): LlmError | undefined {
   const facts = eventErrorFacts(event, status)
   if (providerCode === 'websocket_connection_limit_reached'
     || providerCode === 'previous_response_not_found') {
-    return new LlmError('native Codex WebSocket requested a fresh connection', 'WS_RETRYABLE_RESET', facts)
+    return retryError('native Codex WebSocket requested a fresh connection', 'WS_RETRYABLE_RESET', facts)
   }
   if (providerCode === 'unauthorized' || providerCode === 'invalid_api_key' || status === 401) {
-    return new LlmError('native Codex WebSocket authentication failed', 'WS_AUTH', facts)
+    return retryError('native Codex WebSocket authentication failed', 'WS_AUTH', facts)
   }
-  if (status === 403) return new LlmError('native Codex WebSocket authorization failed', 'AUTH', facts)
+  if (status === 403) return retryError('native Codex WebSocket authorization failed', 'AUTH', facts)
   const classified = responsesFailure(providerCode,
     typeof error.message === 'string' ? error.message : undefined)
   if (classified.code !== 'SERVER') {
     const delay = facts?.providerRetryAfterMs ?? classified.failure.providerRetryAfterMs
-    return new LlmError(classified.message, classified.code === 'RATE_LIMIT' ? 'RATE_LIMITED' : classified.code, {
+    return retryError(classified.message, classified.code === 'RATE_LIMIT' ? 'RATE_LIMITED' : classified.code, {
       ...facts,
-      ...(delay === undefined ? {} : { providerRetryAfterMs: Math.min(delay, 120_000) }),
+      ...(delay === undefined ? {} : { providerRetryAfterMs: delay }),
     })
   }
   if (providerCode === 'usage_limit_reached' || status === 429) {
-    return new LlmError('native Codex WebSocket rate limit was reached', 'RATE_LIMITED', facts)
+    return retryError('native Codex WebSocket rate limit was reached', 'RATE_LIMITED', facts)
   }
   if (status !== undefined && status >= 500) {
-    return new LlmError('native Codex WebSocket service failed', 'WS_RETRYABLE', facts)
+    return retryError('native Codex WebSocket service failed', 'WS_RETRYABLE', facts)
   }
-  return new LlmError('native Codex WebSocket request was rejected', 'INVALID_REQUEST', facts)
+  return retryError('native Codex WebSocket request was rejected', 'INVALID_REQUEST', facts)
 }
 
 /** Prefer WebSocket v2; once safe retries exhaust, keep that DSH session on HTTP. */
@@ -329,8 +312,8 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
   }
 
   private retryDelay(retry: number, error: LlmError): number {
-    const providerDelay = error.failure.providerRetryAfterMs
-    if (providerDelay !== undefined) return Math.min(providerDelay, this.maxRetryDelayMs)
+    const providerDelay = remainingRetryDelay(error)
+    if (providerDelay !== undefined) return providerDelay
     const exponential = Math.min(
       this.initialRetryDelayMs * (2 ** retry), this.maxRetryDelayMs,
     )
@@ -342,13 +325,13 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
   private async wait(retry: number, error: LlmError, signal: AbortSignal, telemetry: NetworkRequestHandle): Promise<void> {
     const delay = this.retryDelay(retry, error)
     telemetry.retry(delay)
-    await (this.options.sleep ?? sleep)(delay, signal)
+    await (this.options.sleep ?? sleepRetry)(delay, signal)
   }
 
   private async waitForConnection(delayMs: number, signal: AbortSignal, telemetry: NetworkRequestHandle): Promise<void> {
     telemetry.retry(delayMs, 'connection')
     this.options.warn?.(`native Codex network is unavailable; reconnecting in ${delayMs}ms`)
-    await (this.options.sleep ?? sleep)(delayMs, signal)
+    await (this.options.sleep ?? sleepRetry)(delayMs, signal)
   }
 
   private closeEntry(entry: SessionEntry): void {
@@ -550,7 +533,8 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
         const nextTurnState = codexResponseTurnState(event)
         if (nextTurnState !== undefined) entry.turnState = nextTurnState
       }
-      const output = normalizedOutputItem(event)
+      const chunks = translator.push(event)
+      const output = normalizedOutputItem(event, translator)
       if (output !== undefined) outputItems.push(output)
       if (event.type === 'response.completed') {
         const response = typeof (event as unknown as Record<string, unknown>).response === 'object'
@@ -560,7 +544,6 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
         const responseId = typeof response?.id === 'string' ? response.id : ''
         entry.protocol.complete(responseId, outputItems)
       }
-      const chunks = translator.push(event)
       if (!prewarm) for (const chunk of chunks) yield chunk
       if (translator.terminated) {
         if (event.type !== 'response.completed') entry.protocol.reset()
@@ -746,7 +729,9 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
           }
           if (failureValue.code === 'WS_UPGRADE_REQUIRED' || retryable) {
             entry.disabled = true
-            telemetry.retry(0)
+            if (remainingRetryDelay(failureValue) !== undefined) {
+              await this.wait(reconnects, failureValue, signal, telemetry)
+            } else telemetry.retry(0)
             yield* this.http.stream(activeGeneration, fallbackMode(), telemetry)
             requestCompleted = true
             return

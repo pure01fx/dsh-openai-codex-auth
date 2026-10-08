@@ -1,6 +1,6 @@
 import { ToolCallId, LlmError, type ContentBlock, type GenerateOptions, type StreamChunk, type TokenUsage, type ToolSchema } from '@deepseek-ai/dsh-llm';
 import { type ParseSseOptions } from './sse.js';
-import { type NativeCodexReplaySource } from './replay.js';
+import { type CodexMessagePhase, type NativeCodexReplaySource } from './replay.js';
 export declare const DEFAULT_CODEX_INSTRUCTIONS = "You are Codex, an AI coding agent. Help the user with software engineering tasks.";
 export type CodexImageDetail = 'auto' | 'low' | 'high' | 'original';
 export interface ResolvedImagePart {
@@ -57,7 +57,7 @@ export interface ResponsesUsage {
 /** Map provider totals to DSH's strict disjoint token counts. */
 export declare function mapResponsesUsage(usage: ResponsesUsage): TokenUsage;
 /** Classify in-band failure data without reflecting provider text. */
-export declare function responsesFailure(code?: string, message?: string): LlmError;
+export declare function responsesFailure(code?: string, message?: string, headers?: unknown): LlmError;
 interface ResponsesOutputItem {
     type?: string;
     id?: string;
@@ -68,6 +68,7 @@ interface ResponsesOutputItem {
     encrypted_content?: string;
     summary?: unknown[];
     status?: string;
+    phase?: CodexMessagePhase | null;
     content?: Array<{
         type?: string;
         text?: string;
@@ -90,6 +91,7 @@ export interface ResponsesStreamEvent {
         error?: {
             code?: string;
             message?: string;
+            headers?: unknown;
         };
         incomplete_details?: {
             reason?: string;
@@ -107,11 +109,15 @@ export declare class ResponsesStreamTranslator {
     private readonly replayContext?;
     private readonly blocks;
     private readonly order;
+    private readonly messagePhases;
     private readonly replayCapture;
     private nextIndex;
     private sawToolCall;
     terminated: boolean;
     constructor(replayContext?: ResponsesReplayContext | undefined);
+    /** The same effective phase feeds durable replay and WebSocket prefix comparison. */
+    messagePhase(id: string): CodexMessagePhase | undefined;
+    private captureMessagePhase;
     private append;
     private fill;
     private open;

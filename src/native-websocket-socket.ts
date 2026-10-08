@@ -4,6 +4,7 @@ import type { IncomingHttpHeaders } from 'node:http'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { getProxyForUrl } from 'proxy-from-env'
 import { nativeCodexEndpoint } from './endpoint.js'
+import { retryAfterMs, retryError } from './retry-after.js'
 import {
   NATIVE_CODEX_CONNECTION_FAILED_CODE,
   isNativeCodexConnectionFailure,
@@ -37,7 +38,7 @@ export interface NativeCodexWebSocketFactory {
 }
 
 function failure(message: string, code: string, cause?: unknown): LlmError {
-  return new LlmError(message, code, cause === undefined ? undefined : { cause })
+  return retryError(message, code, cause === undefined ? undefined : { cause })
 }
 
 function abortFailure(signal?: AbortSignal): LlmError {
@@ -52,9 +53,7 @@ function handshakeFacts(
   const first = (value: string | string[] | undefined): string | undefined =>
     Array.isArray(value) ? value[0] : value
   const requestId = first(headers['x-request-id'])
-  const retryAfter = Number(first(headers['retry-after']))
-  const providerRetryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0
-    ? Math.min(retryAfter * 1_000, 120_000) : undefined
+  const providerRetryAfterMs = retryAfterMs(first(headers['retry-after']))
   return {
     ...(status === undefined ? {} : { status }),
     ...(providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs }),
@@ -229,7 +228,7 @@ export class NodeNativeCodexWebSocketFactory implements NativeCodexWebSocketFact
                   ? 'WS_RETRYABLE'
                   : response.statusCode !== undefined && response.statusCode >= 400
                     ? 'INVALID_REQUEST' : 'WS_HANDSHAKE'
-        reject(new LlmError(
+        reject(retryError(
           `native Codex WebSocket handshake failed (HTTP ${response.statusCode ?? 0})`,
           code,
           handshakeFacts(response.statusCode, response.headers),

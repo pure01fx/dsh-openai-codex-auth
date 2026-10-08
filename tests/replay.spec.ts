@@ -49,6 +49,77 @@ function finishState(chunks: readonly StreamChunk[]): NativeCodexReplayState {
 }
 
 describe('native Codex continuation replay', () => {
+  it.each(['commentary', 'partial_answer', 'final_answer'] as const)(
+    'preserves %s from added-only or done items through durable restart/fork replay', async (phase) => {
+      for (const placement of ['added', 'done', 'both'] as const) {
+        const item = { type: 'message', id: 'msg_phase', content: [{ type: 'output_text', text: 'answer' }] }
+        const events = [
+          { type: 'response.output_item.added', item: { ...item, ...(placement !== 'done' ? { phase } : {}) } },
+          { type: 'response.output_item.done', item: { ...item, ...(placement !== 'added' ? { phase } : {}) } },
+          { type: 'response.completed', response: {} },
+        ]
+        const chunks = await collect(streamResponses(bytes(events.map(event => 'data: ' + JSON.stringify(event) + '\n\n').join('')), {
+          replayContext: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base' },
+        }))
+        const assembler = new BlockAssembler()
+        for (const chunk of chunks) assembler.push(chunk)
+        const saved = JSON.parse(JSON.stringify({ content: assembler.blocks(), replayState: assembler.replayState }))
+        expect(finishState(chunks).version).toBe(1)
+        for (const sessionId of ['restarted', 'forked']) {
+          const body = codexRequestBody(options({ sessionId: sessionId as GenerateOptions['sessionId'] }), [{
+            role: 'assistant', content: saved.content,
+            replaySource: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base', replayState: saved.replayState },
+          }])
+          expect(body.input).toContainEqual({ ...item, role: 'assistant', phase })
+        }
+      }
+    },
+  )
+
+  it.each([
+    ['partial_answer', 'partial_answer'],
+    [null, 'commentary'],
+  ] as const)('resolves added commentary with done phase %s to %s', async (donePhase, expectedPhase) => {
+    const item = { type: 'message', id: 'msg_phase_update', content: [{ type: 'output_text', text: 'answer' }] }
+    const events = [
+      { type: 'response.output_item.added', item: { ...item, phase: 'commentary' } },
+      { type: 'response.output_item.done', item: { ...item, phase: donePhase } },
+      { type: 'response.completed', response: {} },
+    ]
+    const chunks = await collect(streamResponses(bytes(events.map(event => 'data: ' + JSON.stringify(event) + '\n\n').join('')), {
+      replayContext: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base' },
+    }))
+    const state = JSON.parse(JSON.stringify(finishState(chunks)))
+    expect(state.items).toEqual([{ type: 'message', id: item.id, blocks: [0], phase: expectedPhase }])
+    expect(replayAssistantInput([{ type: 'text', text: 'answer' }], {
+      provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base', replayState: state,
+    })).toEqual([{ ...item, role: 'assistant', phase: expectedPhase }])
+  })
+
+  it.each([undefined, null])('keeps absent wire phase backward compatible: %s', async (phase) => {
+    const events = [
+      { type: 'response.output_item.done', item: { type: 'message', id: 'msg_legacy', phase, content: [{ type: 'output_text', text: 'ok' }] } },
+      { type: 'response.completed', response: {} },
+    ]
+    const state = finishState(await collect(streamResponses(bytes(events.map(event => 'data: ' + JSON.stringify(event) + '\n\n').join('')), {
+      replayContext: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base' },
+    })))
+    expect(state.items).toEqual([{ type: 'message', id: 'msg_legacy', blocks: [0] }])
+  })
+
+  it.each(['analysis', '', 42, {}])('rejects invalid phase %j on ingestion and durable replay', async (phase) => {
+    for (const type of ['response.output_item.added', 'response.output_item.done']) {
+      const item = { type: 'message', id: 'msg_invalid', phase, content: [{ type: 'output_text', text: 'ok' }] }
+      await expect(collect(streamResponses(bytes('data: ' + JSON.stringify({ type, item }) + '\n\n'))))
+        .rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+    }
+    expect(() => replayAssistantInput([{ type: 'text', text: 'ok' }], {
+      provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base',
+      replayState: { kind: NATIVE_CODEX_REPLAY_KIND, version: 1, provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base',
+        items: [{ type: 'message', blocks: [0], phase }] },
+    })).toThrowError(expect.objectContaining({ code: 'INVALID_REPLAY_STATE' }))
+  })
+
   it('captures only opaque reasoning and durable block references', async () => {
     const chunks = await collect(streamResponses(bytes(TOOL_REASONING_SSE), {
       replayContext: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base-fast' },
@@ -119,7 +190,7 @@ describe('native Codex continuation replay', () => {
       },
     ]
 
-    expect(codexRequestBody(options(), messages).input).toEqual([
+    expect((codexRequestBody(options(), messages).input as Array<Record<string, unknown>>).filter(item => item.role !== 'developer')).toEqual([
       {
         type: 'reasoning', id: 'reason_redacted',
         summary: [{ type: 'summary_text', text: 'Checked safely.' }],
@@ -228,8 +299,9 @@ describe('native Codex continuation replay', () => {
         }],
       },
     ]).input as Array<Record<string, unknown>>
-    expect(input[0]?.call_id).toBe(input[1]?.call_id)
-    expect(String(input[0]?.call_id)).toHaveLength(64)
+    const calls = input.filter(item => item.type === 'function_call' || item.type === 'function_call_output')
+    expect(calls[0]?.call_id).toBe(calls[1]?.call_id)
+    expect(String(calls[0]?.call_id)).toHaveLength(64)
     expect(JSON.stringify(state)).toBe(stateBefore)
   })
 
