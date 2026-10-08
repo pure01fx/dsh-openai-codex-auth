@@ -122,13 +122,150 @@ describe('NativeCodexWebSocketTransport', () => {
         { role: 'user', content: [{ type: 'text', text: 'Visible request.' }] },
       ] }))
       expect(scripted.sent).toHaveLength(2)
-      expect(JSON.parse(scripted.sent[0]!)).toMatchObject({ input: [
+      expect(JSON.parse(scripted.sent[0]!).input.slice(-2)).toMatchObject([
         { role: 'developer', content: [{ type: 'input_text', text: 'Keep the required instruction.' }] },
         { role: 'user', content: [{ type: 'input_text', text: 'Visible request.' }] },
-      ] })
+      ])
       expect(fallback).not.toHaveBeenCalled()
     } finally { transport.dispose() }
   })
+
+  it('preserves phase in incremental comparison when the server item id cannot be replayed', async () => {
+    const item = { type: 'message', id: 'unprefixed', phase: 'partial_answer', content: [{ type: 'output_text', text: 'answer' }] }
+    const scripted = socket([
+      completed('resp_warm'),
+      JSON.stringify({ type: 'response.output_item.done', item }),
+      completed('resp_phase'),
+      ...textResponse('resp_next', 'msg_next', 'done'),
+    ])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL, webSocketFactory: new ScriptedFactory([scripted]),
+      fetch: vi.fn() as unknown as typeof fetch,
+    })
+    try {
+      const initial = firstRequest()
+      const first = await collect(transport.stream(initial))
+      const saved = JSON.parse(JSON.stringify(finishState(first)))
+      expect(saved.response.items).toEqual([{ type: 'message', blocks: [0], phase: 'partial_answer' }])
+      const assistant = createAssistantMessage({
+        content: [{ type: 'text', text: 'answer' }],
+        source: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base', replayState: saved },
+      })
+      await collect(transport.stream({
+        ...initial,
+        messages: [...initial.messages, assistant, createUserMessage({ content: [{ type: 'text', text: 'next' }], source: { kind: 'user' } })],
+      }))
+      const payload = JSON.parse(scripted.sent[2]!)
+      expect(payload.previous_response_id).toBe('resp_phase')
+      expect(payload.input).toEqual([{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }])
+    } finally { transport.dispose() }
+  })
+
+  it.each([
+    [{ 'Retry-After': 300 }, 300_000],
+    [{ 'Retry-After': 'Fri, 31 Feb 2020 08:49:37 GMT' }, 240_000],
+    [{ 'Retry-After': '\n5\n' }, 240_000],
+    [{ 'Retry-After': 'Sun, 06 Nov 1994 08:49:37 GMT' }, 300_000],
+  ])('prefers valid nested WebSocket retry headers: %j', async (headers, expected) => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('Sun, 06 Nov 1994 08:44:37 GMT'))
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([socket([JSON.stringify({
+        type: 'error', status: 429, headers: { 'retry-after': '240' },
+        error: { code: 'slow_down', message: 'Try again in 1s', headers },
+      })])]),
+    })
+    await expect(collect(transport.stream(firstRequest()))).rejects.toMatchObject({
+      failure: { providerRetryAfterMs: expected },
+    })
+  })
+
+  it('aborts a server-advised fallback wait without issuing HTTP', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.fn(async () => response())
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([
+        new LlmError('upgrade', 'WS_UPGRADE_REQUIRED', { providerRetryAfterMs: 300_000 }),
+      ]),
+      fetch: fetchMock,
+      sleep: async (delay, signal) => {
+        expect(delay).toBeGreaterThan(299_000)
+        controller.abort()
+        await import('../src/retry-after.ts').then(({ sleepRetry }) => sleepRetry(delay, signal))
+      },
+    })
+    await expect(collect(transport.stream({ ...firstRequest(), signal: controller.signal })))
+      .rejects.toMatchObject({ code: 'ABORTED' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('honors final WebSocket advice before HTTP fallback after reconnect exhaustion', async () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0)
+    const delays: number[] = []
+    const makeError = () => socket([JSON.stringify({ type: 'error', status: 503,
+      error: { headers: { 'retry-after': 300 } },
+    })])
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: new ScriptedFactory([makeError(), makeError()]),
+      maxWebSocketReconnects: 0, maxRetryDelayMs: 100,
+      sleep: async delay => { delays.push(delay) },
+      fetch: async () => { expect(delays).toEqual([300_000, 300_000]); return response() },
+    })
+    await collect(transport.stream(firstRequest()))
+    expect(delays).toEqual([300_000, 300_000])
+  })
+
+  it.each(['commentary', 'partial_answer', 'final_answer'] as const)(
+    'compares %s in incremental history and replays it after restart/fork', async (phase) => {
+      for (const placement of ['added', 'done'] as const) {
+        for (const continuation of ['incremental', 'changed-phase', 'restart', 'fork'] as const) {
+          const item = { type: 'message', id: 'msg_phase', content: [{ type: 'output_text', text: 'answer' }] }
+          const scripted = socket([
+            completed('resp_warm'),
+            JSON.stringify({ type: 'response.output_item.added', item: { ...item, ...(placement === 'added' ? { phase } : {}) } }),
+            JSON.stringify({ type: 'response.output_item.done', item: { ...item, ...(placement === 'done' ? { phase } : {}) } }),
+            completed('resp_phase'),
+            ...textResponse('resp_next', 'msg_next', 'done'),
+          ])
+          const restarted = socket([completed('resp_restart_warm'), ...textResponse('resp_restart', 'msg_restart', 'done')])
+          const factory = new ScriptedFactory([scripted, restarted])
+          const config = { resolveCredential: async () => CREDENTIAL, webSocketFactory: factory, fetch: vi.fn() as unknown as typeof fetch }
+          let transport = new NativeCodexWebSocketTransport(config)
+          try {
+            const initial = firstRequest()
+            const first = await collect(transport.stream(initial))
+            const saved = JSON.parse(JSON.stringify(finishState(first)))
+            const expectedPhase = continuation === 'changed-phase' ? (phase === 'final_answer' ? 'partial_answer' : 'final_answer') : phase
+            saved.response.items[0].phase = expectedPhase
+            const assistant = createAssistantMessage({
+              content: [{ type: 'text', text: 'answer' }],
+              source: { provider: NATIVE_CODEX_PROVIDER, model: 'gpt-base', replayState: saved },
+            })
+            if (continuation === 'restart') {
+              transport.dispose()
+              transport = new NativeCodexWebSocketTransport(config)
+            }
+            await collect(transport.stream({
+              ...initial,
+              ...(continuation === 'fork' ? { sessionId: 'forked-session' as GenerateOptions['sessionId'] } : {}),
+              messages: [...initial.messages, assistant, createUserMessage({ content: [{ type: 'text', text: 'next' }], source: { kind: 'user' } })],
+            }))
+            const payload = JSON.parse(continuation === 'restart' || continuation === 'fork' ? restarted.sent[0]! : scripted.sent[2]!)
+            if (continuation === 'incremental') {
+              expect(payload.previous_response_id).toBe('resp_phase')
+              expect(payload.input).toEqual([{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] }])
+            } else {
+              expect(payload.previous_response_id).toBeUndefined()
+              expect(payload.input).toContainEqual({ ...item, role: 'assistant', phase: expectedPhase })
+            }
+          } finally { transport.dispose() }
+        }
+      }
+    },
+  )
+
 
   it.each(['incremental', 'changed-model', 'reconnect', 'http-fallback'] as const)(
     'preserves image context across transport paths: %s', async (scenario) => {
@@ -180,7 +317,7 @@ describe('NativeCodexWebSocketTransport', () => {
               : String(fetchMock.mock.calls[0]?.[1]?.body)
           const payload = JSON.parse(encoded)
           expect(payload.previous_response_id).toBeUndefined()
-          expect(payload.input).toHaveLength(3)
+          expect(payload.input.filter((item: { role?: string }) => item.role !== 'developer')).toHaveLength(3)
           expect(encoded).toContain('data:image/png;base64,')
         }
         expect(fetchMock).toHaveBeenCalledTimes(scenario === 'http-fallback' ? 1 : 0)
@@ -241,7 +378,7 @@ describe('NativeCodexWebSocketTransport', () => {
     expect(warmup).toMatchObject({
       type: 'response.create', model: 'gpt-base', generate: false,
     })
-    expect(warmup.input).toHaveLength(1)
+    expect(warmup.input.filter((item: { role?: string }) => item.role !== 'developer')).toHaveLength(1)
     expect(initial).toMatchObject({
       type: 'response.create', model: 'gpt-base',
       previous_response_id: 'resp_warm', input: [],
@@ -369,7 +506,7 @@ describe('NativeCodexWebSocketTransport', () => {
     await collect(transport.stream({ ...firstRequest(), messages }))
 
     const [warmup, initial] = scripted.sent.map(text => JSON.parse(text))
-    expect(warmup.input).toEqual([{
+    expect(warmup.input.filter((item: { role?: string }) => item.role !== 'developer')).toEqual([{
       type: 'message',
       role: 'user',
       content: [
@@ -405,7 +542,7 @@ describe('NativeCodexWebSocketTransport', () => {
     await collect(transport.stream({ ...firstRequest(), messages }))
 
     const [warmup, initial] = scripted.sent.map(text => JSON.parse(text))
-    expect(warmup.input).toHaveLength(2049)
+    expect(warmup.input.filter((item: { role?: string }) => item.role !== 'developer')).toHaveLength(2049)
     expect(initial).toMatchObject({
       previous_response_id: 'resp_warm_large', input: [],
     })
@@ -744,7 +881,7 @@ describe('NativeCodexWebSocketTransport', () => {
     await expect(pending).rejects.toMatchObject({ code: 'DISPOSED' })
   })
 
-  it('backs off reconnects and honors bounded provider retry delays', async () => {
+  it('backs off reconnects and honors provider retry delays beyond the backoff cap', async () => {
     const delays: number[] = []
     const factory = new ScriptedFactory([
       new LlmError('retry later', 'WS_RETRYABLE', { providerRetryAfterMs: 2_000 }),
@@ -763,7 +900,7 @@ describe('NativeCodexWebSocketTransport', () => {
     await collect(transport.stream(firstRequest()))
 
     expect(factory.options).toHaveLength(2)
-    expect(delays).toEqual([1_000])
+    expect(delays).toEqual([2_000])
   })
 
   it('falls back immediately on 426 and keeps the session on HTTP', async () => {
@@ -831,7 +968,7 @@ describe('NativeCodexWebSocketTransport', () => {
     expect(error).toMatchObject({
       code: NATIVE_CODEX_STREAM_INTERRUPTED_CODE,
       failure: {
-        providerRetryAfterMs: 10_000,
+        providerRetryAfterMs: 30_000,
         requestId: 'req-post-output',
       },
     })
@@ -1266,6 +1403,23 @@ describe('NativeCodexWebSocketTransport', () => {
     vi.stubEnv('http_proxy', '')
     expect(nativeCodexWebSocketProxy('http://127.0.0.2:8080/responses'))
       .toBe('http://127.0.0.1:7891')
+  })
+
+  it('retains HTTP-date Retry-After from a rejected WebSocket handshake', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('Sun, 06 Nov 1994 08:44:37 GMT'))
+    const server = createServer((_request, response) => {
+      response.writeHead(503, { 'Retry-After': 'Sun, 06 Nov 1994 08:49:37 GMT' })
+      response.end()
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const address = server.address() as AddressInfo
+      await expect(new NodeNativeCodexWebSocketFactory().connect({
+        url: 'http://127.0.0.1:' + address.port + '/responses', headers: {},
+      })).rejects.toMatchObject({ failure: { providerRetryAfterMs: 300_000 } })
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 
   it('tunnels the WebSocket handshake through the selected HTTP proxy', async () => {

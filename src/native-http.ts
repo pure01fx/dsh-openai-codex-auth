@@ -12,6 +12,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { nativeCodexAuthorityHash, type NativeCodexCredential } from './catalog.js'
 import { nativeCodexEndpoint } from './endpoint.js'
+import { retryAfterMs, retryError, remainingRetryDelay, sleepRetry, inheritRetryDeadline } from './retry-after.js'
 import {
   NATIVE_CODEX_CONNECTION_FAILED_CODE,
   NATIVE_CODEX_STREAM_INTERRUPTED_CODE,
@@ -81,7 +82,7 @@ export interface NativeCodexHttpOptions {
 }
 
 function aborted(message = 'native Codex request was aborted'): LlmError {
-  return new LlmError(message, 'ABORTED')
+  return retryError(message, 'ABORTED')
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -91,7 +92,7 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 function fixedFailure(message: string, code: string, options?: ConstructorParameters<typeof LlmError>[2]): LlmError {
-  return new LlmError(message, code, options)
+  return retryError(message, code, options)
 }
 
 function safePositiveInteger(value: number | undefined, fallback: number, name: string): number {
@@ -118,24 +119,6 @@ function stablePromptCacheKey(sessionId: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal)
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(done, delayMs)
-    const abort = (): void => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', abort)
-      const reason = signal?.reason
-      reject(reason instanceof LlmError
-        ? reason : aborted('native Codex retry wait was aborted'))
-    }
-    function done(): void {
-      signal?.removeEventListener('abort', abort)
-      resolve()
-    }
-    signal?.addEventListener('abort', abort, { once: true })
-  })
-}
 
 interface AttemptWatchdog {
   signal: AbortSignal
@@ -324,21 +307,10 @@ async function boundedError(
   }
 }
 
-function retryAfterMs(response: Response, maxDelayMs: number): number | undefined {
-  const raw = response.headers.get('retry-after')
-  if (raw === null) return undefined
-  const seconds = Number(raw)
-  const value = Number.isFinite(seconds)
-    ? seconds * 1_000
-    : Date.parse(raw) - Date.now()
-  return Number.isFinite(value) && value > 0 ? Math.min(value, maxDelayMs) : undefined
-}
-
 function errorFacts(
   response: Response,
-  maxDelayMs: number,
 ): ConstructorParameters<typeof LlmError>[2] {
-  const providerRetryAfterMs = retryAfterMs(response, maxDelayMs)
+  const providerRetryAfterMs = retryAfterMs(response.headers.get('retry-after'))
   const requestId = response.headers.get('x-request-id')
   return {
     status: response.status,
@@ -350,38 +322,45 @@ function errorFacts(
 }
 
 async function httpFailure(
-  response: Response, maxDelayMs: number, signal: AbortSignal | undefined, telemetry: NetworkRequestHandle,
+  response: Response, signal: AbortSignal | undefined, telemetry: NetworkRequestHandle,
 ): Promise<LlmError> {
+  const facts = errorFacts(response)
+  const advice = retryError('native Codex HTTP retry advice', 'SERVER', facts)
+  const fail: typeof fixedFailure = (message, code, options) =>
+    inheritRetryDeadline(fixedFailure(message, code, options), advice)
   const detail = await boundedError(response, signal, telemetry)
-  const facts = errorFacts(response, maxDelayMs)
   const classified = responsesFailure(detail.code, detail.message)
   if (response.status === 401 || response.status === 403) {
-    return fixedFailure('native Codex rejected the configured credential', 'AUTH', facts)
+    return fail('native Codex rejected the configured credential', 'AUTH', facts)
   }
   if (classified.code !== 'SERVER') {
     const delay = facts?.providerRetryAfterMs ?? classified.failure.providerRetryAfterMs
-    return fixedFailure(classified.message, classified.code, {
+    return fail(classified.message, classified.code, {
       ...facts,
-      ...(delay === undefined ? {} : { providerRetryAfterMs: Math.min(delay, maxDelayMs) }),
+      ...(delay === undefined ? {} : { providerRetryAfterMs: delay }),
     })
   }
   if (response.status === 429) {
-    return fixedFailure('native Codex request was rate limited', 'RATE_LIMIT', facts)
+    return fail('native Codex request was rate limited', 'RATE_LIMIT', facts)
   }
   if (response.status === 408 || response.status === 504) {
-    return fixedFailure('native Codex request timed out', 'TIMEOUT', facts)
+    return fail('native Codex request timed out', 'TIMEOUT', facts)
   }
   if (response.status >= 500) {
-    return fixedFailure('native Codex server request failed', 'SERVER', facts)
+    return fail('native Codex server request failed', 'SERVER', facts)
   }
-  return fixedFailure('native Codex request was rejected', 'INVALID_REQUEST', facts)
+  return fail('native Codex request was rejected', 'INVALID_REQUEST', facts)
 }
 
 function mappedFailure(error: unknown, watchdog: AttemptWatchdog, parent?: AbortSignal): LlmError {
   if (parent?.aborted) {
     return parent.reason instanceof LlmError ? parent.reason : aborted()
   }
-  if (watchdog.timedOut()) return fixedFailure('native Codex request timed out', 'TIMEOUT')
+  if (watchdog.timedOut()) return fixedFailure('native Codex request timed out', 'TIMEOUT', {
+    cause: error,
+    ...(error instanceof LlmError && error.failure.providerRetryAfterMs !== undefined
+      ? { providerRetryAfterMs: error.failure.providerRetryAfterMs } : {}),
+  })
   if (error instanceof LlmError) return error
   return fixedFailure('native Codex transport failed', 'TRANSPORT', { cause: error })
 }
@@ -412,8 +391,7 @@ function retryable(error: LlmError): boolean {
 
 function failedStepRetry(error: LlmError): LlmError {
   const failure = error.failure
-  const providerRetryAfterMs = failure.providerRetryAfterMs === undefined
-    ? undefined : Math.min(failure.providerRetryAfterMs, DEFAULT_MAX_RETRY_DELAY_MS)
+  const providerRetryAfterMs = failure.providerRetryAfterMs
   return fixedFailure(
     `native Codex response stream was interrupted: ${error.message}`,
     NATIVE_CODEX_STREAM_INTERRUPTED_CODE,
@@ -463,7 +441,7 @@ export class NativeCodexHttpTransport {
   }
 
   private retryDelay(retry: number, providerDelay?: number): number {
-    if (providerDelay !== undefined) return Math.min(providerDelay, this.maxDelayMs)
+    if (providerDelay !== undefined) return providerDelay
     const exponential = Math.min(this.initialDelayMs * (2 ** retry), this.maxDelayMs)
     const random = this.options.random?.() ?? Math.random()
     const jitter = 0.9 + Math.max(0, Math.min(1, random)) * 0.2
@@ -471,15 +449,15 @@ export class NativeCodexHttpTransport {
   }
 
   private async wait(retry: number, error: LlmError, signal: AbortSignal | undefined, telemetry: NetworkRequestHandle): Promise<void> {
-    const delay = this.retryDelay(retry, error.failure.providerRetryAfterMs)
+    const delay = this.retryDelay(retry, remainingRetryDelay(error))
     telemetry.retry(delay)
-    await (this.options.sleep ?? sleep)(delay, signal)
+    await (this.options.sleep ?? sleepRetry)(delay, signal)
   }
 
   private async waitForConnection(delayMs: number, signal: AbortSignal | undefined, telemetry: NetworkRequestHandle): Promise<void> {
     telemetry.retry(delayMs, 'connection')
     this.options.warn?.(`native Codex network is unavailable; reconnecting in ${delayMs}ms`)
-    await (this.options.sleep ?? sleep)(delayMs, signal)
+    await (this.options.sleep ?? sleepRetry)(delayMs, signal)
   }
 
   endpointUrl(): string { return this.endpoint }
@@ -646,7 +624,7 @@ export class NativeCodexHttpTransport {
           throw fixedFailure(
             'native Codex rejected the configured credential',
             'AUTH',
-            errorFacts(response, this.maxDelayMs),
+            errorFacts(response),
           )
         } catch (error) {
           const connection = connectionFailure(error, watchdog, generation.signal)
@@ -663,7 +641,7 @@ export class NativeCodexHttpTransport {
         }
       }
       if (!response.ok) {
-        let failure = await httpFailure(response, this.maxDelayMs, watchdog.signal, telemetry)
+        let failure = await httpFailure(response, watchdog.signal, telemetry)
         if (generation.signal?.aborted || watchdog.timedOut()) {
           failure = mappedFailure(failure, watchdog, generation.signal)
         }

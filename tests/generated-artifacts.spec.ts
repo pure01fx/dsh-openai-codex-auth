@@ -29,6 +29,7 @@ describe('generated package artifacts', () => {
       files: string[]
     }
     expect(manifest.files).toEqual(expect.arrayContaining([
+      'lib/retry-after.js', 'lib/retry-after.d.ts',
       'lib/rate-limits.js', 'lib/rate-limits.d.ts',
       'lib/response-usage.js', 'lib/response-usage.d.ts',
       'lib/upstream.js', 'lib/upstream.d.ts',
@@ -46,7 +47,7 @@ describe('generated package artifacts', () => {
     expect(parseCodexResponseUsageMetadata).toBeTypeOf('function')
     expect(mergeDirectUsage).toBeTypeOf('function')
     expect(TRACKED_CODEX_COMMIT).toMatch(/^[0-9a-f]{40}$/u)
-    expect(CODEX_CLIENT_VERSION).toBe('0.155.0')
+    expect(CODEX_CLIENT_VERSION).toBe('0.162.0')
     const adapter = new NativeCodexAdapter({
       etag: () => undefined,
       list: async () => [{
@@ -122,7 +123,7 @@ describe('generated package artifacts', () => {
         'cloud-http', 'cloud-search', 'cloud-context', 'cloud-web-tool',
         'cloud-images', 'cloud-media', 'cloud-vision', 'cloud-tools',
         'native-websocket', 'native-websocket-session', 'native-websocket-socket',
-        'rate-limits', 'replay', 'response-usage', 'responses', 'sse', 'upstream', 'usage',
+        'rate-limits', 'retry-after', 'replay', 'response-usage', 'responses', 'sse', 'upstream', 'usage',
       ]
       for (const module of modules) {
         for (const extension of ['js', 'd.ts']) {

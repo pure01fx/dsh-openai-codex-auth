@@ -81,10 +81,10 @@ describe('NativeCodexHttpTransport', () => {
       { role: 'user', content: [{ type: 'text', text: 'Visible request.' }] },
     ] })))
     expect(sent).toHaveLength(1)
-    expect(sent[0]).toMatchObject({ input: [
+    expect(sent[0].input.slice(-2)).toMatchObject([
       { role: 'developer', content: [{ type: 'input_text', text: 'Keep the required instruction.' }] },
       { role: 'user', content: [{ type: 'input_text', text: 'Visible request.' }] },
-    ] })
+    ])
   })
 
   it('sends large UTF-8 context intact through HTTP', async () => {
@@ -97,7 +97,7 @@ describe('NativeCodexHttpTransport', () => {
       resolveCredential: async () => CREDENTIAL,
       fetch: async (_input, init) => {
         const body = JSON.parse(String(init?.body))
-        expect(body.input[0].content[0].text).toBe(text)
+        expect(body.input.find((item: { role?: string }) => item.role === 'user').content[0].text).toBe(text)
         sent = true
         return successResponse()
       },
@@ -106,7 +106,7 @@ describe('NativeCodexHttpTransport', () => {
     expect(sent).toBe(true)
   })
 
-  it('sends Astra through HTTP Responses Lite without changing Standard requests', async () => {
+  it('shares developer instructions while keeping HTTP Standard and Lite controls distinct', async () => {
     const captured: Array<{ headers: Headers; body: Record<string, unknown> }> = []
     const transport = new NativeCodexHttpTransport({
       resolveCredential: async () => CREDENTIAL,
@@ -153,7 +153,8 @@ describe('NativeCodexHttpTransport', () => {
     expect(captured[0]?.body).not.toHaveProperty('instructions')
     expect(captured[0]?.body).not.toHaveProperty('tools')
     expect(captured[1]?.body).toMatchObject({
-      model: 'gpt-standard', instructions: 'Astra instructions', parallel_tool_calls: true,
+      model: 'gpt-standard', parallel_tool_calls: true,
+      input: expect.arrayContaining([{ type: 'message', id: expect.stringMatching(/^msg_[0-9a-f-]{36}$/), role: 'developer', content: [{ type: 'input_text', text: 'Astra instructions' }], internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] } }]),
     })
   })
 
@@ -216,7 +217,7 @@ describe('NativeCodexHttpTransport', () => {
         },
       }] as unknown as GenerateOptions['messages'],
     })))
-    expect(capturedBody?.input).toEqual([{
+    expect(capturedBody?.input.slice(1)).toEqual([{
       type: 'message',
       role: 'assistant',
       content: [{ type: 'output_text', text: 'durable answer' }],
@@ -262,7 +263,7 @@ describe('NativeCodexHttpTransport', () => {
       }] as unknown as GenerateOptions['messages'],
     })))
 
-    expect(capturedBody?.input).toEqual([{
+    expect(capturedBody?.input.slice(1)).toEqual([{
       type: 'message',
       role: 'user',
       content: [
@@ -563,8 +564,8 @@ describe('NativeCodexHttpTransport', () => {
       expect(promptCacheKey).not.toBe(routingId)
       expect(body).toEqual({
         model: 'gpt-test',
-        instructions: 'explicit system',
         input: [
+          { type: 'message', id: expect.stringMatching(/^msg_[0-9a-f-]{36}$/), role: 'developer', content: [{ type: 'input_text', text: 'explicit system' }], internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] } },
           { type: 'message', role: 'user', content: [
             { type: 'input_text', text: 'inspect' },
             { type: 'input_image', image_url: 'data:image/png;base64,AQID' },
@@ -754,7 +755,7 @@ describe('NativeCodexHttpTransport', () => {
     })))
 
     expect(readImage).toHaveBeenCalledTimes(1)
-    expect(body.input).toEqual([{
+    expect(body.input.slice(1)).toEqual([{
       type: 'message',
       role: 'user',
       content: [{ type: 'input_image', image_url: 'data:image/png;base64,AQID' }],
@@ -804,7 +805,7 @@ describe('NativeCodexHttpTransport', () => {
       ] as unknown as GenerateOptions['messages'],
     })))
 
-    expect(bodies[1]?.input).toEqual([
+    expect(bodies[1]?.input.slice(1)).toEqual([
       {
         type: 'reasoning', id: 'reason_redacted',
         summary: [{ type: 'summary_text', text: 'Checked safely.' }],

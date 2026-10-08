@@ -18,7 +18,7 @@ describe('package integration boundary', () => {
       .rejects.toMatchObject({ code: 'ENOENT' })
     const changelog = await text('../CHANGELOG.md')
     expect(changelog).toMatch(/^# Changelog\n\n## Unreleased\n/)
-    expect(changelog).toContain(`## 0.12.0`)
+    expect(changelog).toContain(`## ${root.version}`)
     expect(await text('../cordis.patch.yml')).toBe(
       '# Native Codex is the package default. Integration bundles own any removal or\n'
       + '# replacement of an existing openai-codex route before mounting this plugin.\n'

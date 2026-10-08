@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.13.0
+
+- Targets DSH 0.2.0-rc.2 with exact SDK peers, development dependencies and runtime helpers; retains the tool-message, shell and provenance migration below.
+- Merges GPT-6.1 catalog routing, shared Retry-After handling, assistant phases and deterministic developer instructions from the latest source.
+- Target build/typecheck and all 517 regression tests pass on DSH 0.2.0-rc.2. No live OAuth/model requests were made; collection-level Web validation is recorded separately.
+
 ## 0.12.0
 
 ### Migration
@@ -21,6 +27,15 @@
 - Shell: execute() then .result() instead of run()
 - Developer messages: preserved in Responses API requests
 - Cloud context: requires toolCallId === source.callId and !isError
+
+- Shares Retry-After parsing across HTTP, SSE, and WebSocket errors, including nested JSON headers and HTTP dates; preserves server deadlines across retries and HTTP fallback without truncating advice to local backoff limits.
+
+- Preserves commentary, partial_answer, and final_answer phases through response events, durable replay, and WebSocket continuation matching; legacy phase-less replay remains readable.
+
+- Moves Standard base instructions into the same deterministic developer-message prefix used by Lite, preserving each protocol’s tool and reasoning controls; changed instructions invalidate WebSocket prefix reuse.
+
+- Requests the live model catalog as Codex 0.162.0 to discover GPT-6.1 Sol; verified that 0.155.0 omits it for the same account despite the bundled 0.153.0 minimum. Adds its exact Lite fallback and dynamic metadata/routing regressions without fabricating catalog availability.
+
 
 ## 0.11.2
 

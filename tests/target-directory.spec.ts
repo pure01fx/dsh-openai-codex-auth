@@ -7,19 +7,19 @@ import { describe, it } from 'vitest'
 // Execute the published target directory classes with the actual target
 // snapshot store (including its Zustand/Immer engine), without minifier-name slicing.
 const target = new URL('../node_modules/@deepseek-ai/', import.meta.url)
-assert.equal(JSON.parse(await readFile(new URL('dsh-client-store/package.json', target), 'utf8')).version, '0.1.7-rc.2')
-assert.equal(JSON.parse(await readFile(new URL('dsh-client-ui-model-selection/package.json', target), 'utf8')).version, '0.1.7-rc.2')
+assert.equal(JSON.parse(await readFile(new URL('dsh-client-store/package.json', target), 'utf8')).version, '0.2.0-rc.2')
+assert.equal(JSON.parse(await readFile(new URL('dsh-client-ui-model-selection/package.json', target), 'utf8')).version, '0.2.0-rc.2')
 const directory = await readFile(new URL('dsh-client-ui-model-selection/lib/client.js', target), 'utf8')
 const bridge = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 function slice(source: string, start: string, end: string) {
   const a = source.indexOf(start), b = source.indexOf(end, a)
-  assert.ok(a >= 0 && b > a, 'target 0.1.7-rc.2 oracle markers changed')
+  assert.ok(a >= 0 && b > a, 'target 0.2.0-rc.2 oracle markers changed')
   return source.slice(a, b)
 }
 const directorySource = slice(directory, 'var ModelCatalogDirectory =', '//#region lib/types/client/service.js')
 const bridgeSource = slice(bridge, 'const HIDDEN_MODELS_KEY', 'const css =')
 
-describe('published 0.1.7-rc.2 directory and projection store', () => {
+describe('published 0.2.0-rc.2 directory and projection store', () => {
   it('filters publication across selection, catalog, config, reload and reconnect; restores lifecycle', async () => {
     await runInNewContext('const _deepseek_ai_dsh_client_store = targetStore;\n' + directorySource + '\n' + bridgeSource + `
       (async () => {
@@ -32,7 +32,7 @@ describe('published 0.1.7-rc.2 directory and projection store', () => {
         const catalog = new ModelCatalogDirectory({remote:{session:{modelCatalog:async()=>{catalogLoads++;return {ok:true,value:catalogValue}}}}});
         const projected = targetStore.createSnapshotStore({next:null});
         const sessions = {selectModel:async value=>{projected.set({next:{provider:value.provider,model:value.model}});return {ok:true}}};
-        const first = new ModelDirectory(sessions,'first',()=>true,catalog,projected);
+        const first = new ModelDirectory(sessions,'first',()=>true,catalog,projected,()=>false);
         let active = first;
         const resolver = {live:{directories:new Map([['first',first]])},directoryFor:()=>active};
         const originalFor = resolver.directoryFor, originalSet = first.store.set;
@@ -69,7 +69,7 @@ describe('published 0.1.7-rc.2 directory and projection store', () => {
         assert.deepEqual(ids(first),['hidden','visible','new'],'unhide restores raw catalog after load');
         writeHiddenModels(['hidden','new']);
         assert.deepEqual(ids(first),['visible']);
-        active = new ModelDirectory(sessions,'second',()=>true,catalog,targetStore.createSnapshotStore({next:null}));
+        active = new ModelDirectory(sessions,'second',()=>true,catalog,targetStore.createSnapshotStore({next:null}),()=>false);
         const secondSet = active.store.set;
         const second = resolver.directoryFor();
         await second.load();
@@ -81,7 +81,7 @@ describe('published 0.1.7-rc.2 directory and projection store', () => {
         assert.equal(resolver.directoryFor,originalFor);
         assert.equal(second.store.set,secondSet);
         second.dispose();
-        const reloaded = new ModelDirectory(sessions,'reload',()=>true,catalog,targetStore.createSnapshotStore({next:null}));
+        const reloaded = new ModelDirectory(sessions,'reload',()=>true,catalog,targetStore.createSnapshotStore({next:null}),()=>false);
         active = reloaded;
         const disposeReload = installModelVisibilityBridge({modelDirectories:resolver});
         await resolver.directoryFor().load();

@@ -17,9 +17,9 @@
 
 ## 快速开始
 
-版本 `0.12.0` 明确适配 DeepSeek Harness `0.1.7-rc.2`，SDK peers/runtime helpers 精确锁定该版本；不声明兼容旧 SDK。旧 DSH `0.1.5-rc.1` profile 应保留原插件 `0.11.2`，升级时在独立 profile 安装新版插件并保留原 profile/锁文件以便回滚。无需迁移账号文件或浏览器隐藏列表；`dsh.engines` 仅作兼容性说明，不当作宿主硬门禁。
+版本 `0.13.0` 明确适配 DeepSeek Harness `0.2.0-rc.2`，SDK peers/runtime helpers 精确锁定该版本；不声明兼容旧 SDK。旧 DSH `0.1.5-rc.1` profile 应保留原插件 `0.11.2`，升级时在独立 profile 安装新版插件并保留原 profile/锁文件以便回滚。无需迁移账号文件或浏览器隐藏列表；`dsh.engines` 仅作兼容性说明，不当作宿主硬门禁。
 
-本版本通过真实目标 LLM/tools 服务与本地 HTTP/SSE/WebSocket 回放、错误/取消回归；模型隐藏覆盖真实目录/catalog/store 的投影更新、重连和重新加载。验证命令为 `pnpm typecheck && pnpm build && pnpm test`；当前版本未执行线上 OAuth/付费模型验收。
+回归范围包含真实目标 LLM/tools 服务、本地 HTTP/SSE/WebSocket 回放、错误/取消，以及模型隐藏在真实目录/catalog/store 的投影更新、重连和重新加载。验证命令为 `pnpm typecheck && pnpm build && pnpm test`；0.13.0 候选版已通过目标版本构建、类型检查和 517 项测试；当前未执行线上 OAuth/付费模型验收。
 
 `0.11.0` 移除了插件额外设置的请求、响应、SSE/WebSocket、图片和重放状态大小上限，以及相应的 transport 选项（含 `maxRequestBodyBytes`）；旧配置中的该字段应删除。搜索结果完整保留，WebSocket 继续优先复用增量上下文。服务端限制、协议校验及 DSH 文件/附件策略仍生效。
 

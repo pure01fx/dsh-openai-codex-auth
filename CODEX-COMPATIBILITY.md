@@ -1,5 +1,44 @@
 # Codex 云端能力兼容性跟踪
 
+## 重试、消息阶段与 Standard 指令对齐（Unreleased）
+
+本节记录对 `ea27864f` 的三项增量适配，取代下方 Retry-After、phase 和 Standard 指令位置的历史待办；其余工作仍独立跟踪。
+
+- Standard 基础指令改为 input 首部的 developer message，和 Lite 共用稳定 UUID 与 `model.base_instructions` metadata 构造。Standard 顶层 tools、并行工具与 reasoning 参数保留各自协议；Lite 的工具前缀及目录模板/DSH 指令组合保持独立。回归验证相同指令保持 WS 前缀复用，改变指令会触发完整请求，HTTP 历史、图片、工具输出和加密 reasoning 顺序不变。
+- 消息 phase 已接收并保留 commentary / partial_answer / final_answer，通过 v1 描述符的可选字段持久化再回放，并让 WS 复用比较使用同一有效 phase。added-only 的 phase 保留到 done，done 的显式 phase 优先；流中的 null/缺失值表示未提供，非法枚举拒绝。测试覆盖 JSON 保存/恢复、分叉和重启的请求构造、真实传输类的增量匹配与 phase 改变后完整重发。缺少 phase 的旧会话可读；旧插件的严格字段校验无法读取含 phase 的新描述符，降级时需考虑这一限制。
+- Retry-After 共用秒数/HTTP-date 解析，支持 JSON 数字值，嵌套错误 headers 优先；保留单次收到建议的单调时钟截止时间，不用本地退避上限截短服务端等待。HTTP 读取错误正文及其超时不会重置或丢弃等待，WS 最后一次失败后切换 HTTP 也遵守剩余等待。长等待分段使用 Node timer，仍可取消。宿主 `LlmError` 只公开正数 duration，无法跨宿主持久化表达单调时钟 deadline；本插件默认 normal 重试策略在宿主等待超上限时交还错误，不会提前重试。宿主另行配置的 always 策略可能忽略长等待，不属于本次插件内改动。
+
+验证：`npm run build`、`npm test`（27 文件 / 511 项）、`npm run typecheck`、`git diff --check`、`npm pack --dry-run --ignore-scripts` 均通过；所有生成模块与新鲜编译一致，新 retry-after 模块已加入打包清单。独立审查发现的非法日期归一化问题已修复，并加入内层非法日期回退外层有效等待的回归。本轮为源码、模拟传输与 loopback 验证，未执行线上推理、发布、替换 hu profile 或重启 GUI。
+
+## GPT-6.1 Sol 增量对齐（Unreleased，2026-10-08）
+
+`../codex` 已 fast-forward 到 `ea27864f99f0b086cec2f9f0251b7190fb9844f1`（本次获取的 origin/main），工作树干净。此轮针对模型发现与 Lite 路由，不宣称完整运行时对齐，原 Provider/cloud 跟踪提交保持不变。
+
+### 已确认的缺失原因与修复
+
+对同一当前账号执行只读线上目录请求（未调用推理、未记录凭据）：
+
+| client_version | originator | HTTP | 返回目录 |
+| --- | --- | --- | --- |
+| 0.153.4 | dsh | 200 | 不含 gpt-6-sol / gpt-6.1-sol |
+| 0.155.0 | dsh | 200 | 含 gpt-6-sol，不含 gpt-6.1-sol |
+| 0.162.0 | dsh | 200 | 含 gpt-6.1-sol，visibility=list |
+| 0.162.0 | codex_cli_rs | 200 | 同样含 gpt-6.1-sol |
+
+上游 `models-manager/models.json` 将 6.1 Sol 的 minimal_client_version 标为 0.153.0，但它不等于线上实际发现门槛。请求版本升至本次已验证的 0.162.0（上游已有 rust-v0.162.0-alpha.20；目录发送去预发布后缀的整版本）。不更改 originator，不将静态模型强行加入账号目录。
+
+补充精确 `gpt-6.1-sol` 的 Lite 后备，目录存在时仍以 metadata 为准。新增精简上游 fixture，验证动态发现、六档 reasoning、默认 low / multi-agent xhigh、Fast 授权、metadata 优先及未知近似名称不误用 Lite。
+
+当前 3080 GUI 的 hu profile 安装的是插件 0.11.1，请求版本 0.153.4。本轮只修改并构建仓库，未替换 profile 安装或重启当前会话；仓库修改不会自动改变正在运行的 GUI。
+
+验证：`npm run build`、`npm test`（26 文件 / 469 项）、`npm run typecheck`、`git diff --check` 全部通过；生成产物一致性测试通过。使用新构建的 NativeCodexCatalog + NativeCodexAdapter 查询当前账号，已返回 `gpt-6.1-sol` 与 `gpt-6.1-sol-fast`，六档推理配置及默认 low 解析成功。本轮未执行模型推理，因此此结果验证发现与元数据，不代表线上推理端到端验收。
+
+### 独立后续兼容性工作
+
+- Retry-After：新上游从 response.failed.response.error.headers 读取等待提示，WebSocket 优先嵌套 headers，支持数字 JSON 值和 HTTP 日期；插件仍遗漏部分嵌套提示并将等待上限压到 120 秒。建议单独对齐共享解析及 deadline 传递，避免早于服务端建议重试。依据 `codex-api/src/sse/responses_error.rs`、`endpoint/responses_websocket.rs`、`http-client/src/retry_after.rs`。这不是 6.1 模型目录缺失原因。
+- 数字自定义 reasoning effort、Standard instructions 移入 developer input、partial_answer phase 回放保真分别存在增量差异，应单独设计与验证。6.1 现有命名 effort 和 Lite 路径不依赖这些改动。
+
+
 ## 已实现：Sol 与错误协议增量适配（0.11.2）
 
 参考上游 `c44deff7b1083e9660ac55d02122481f1cdf139b`，在既有 0.11.1 工作树上完成以下必要改动。此节取代下方历史审查中相应的“待适配”结论；不代表完整上游运行时对齐。
