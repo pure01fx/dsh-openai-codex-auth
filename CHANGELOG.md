@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Adds `locale/en.json` and `locale/zh.json` so the DSH 0.2.0 plugin panel shows a display name and description instead of the package id.
+
 ## 0.13.1
 
 - Serves a concurrent or pool-saturated request over HTTP/SSE instead of failing the turn.

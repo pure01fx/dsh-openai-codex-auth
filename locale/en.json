@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "OpenAI Codex Auth",
+    "description": "Native ChatGPT Codex provider with device-code login, its own model catalog and usage reporting, wired into the DSH Web GUI from the same origin."
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "OpenAI Codex 认证",
+    "description": "原生 ChatGPT Codex 提供方：设备码登录、自带的模型目录与用量统计，与 DSH Web GUI 同源集成。"
+  }
+}

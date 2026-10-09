@@ -28,9 +28,11 @@
       "default": "./lib/index.js"
     },
     "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
+    "locale",
     "lib/index.js",
     "lib/index.d.ts",
     "lib/catalog.js",
