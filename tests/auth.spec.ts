@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { request as httpRequest } from 'node:http'
@@ -1457,6 +1457,105 @@ describe('OpenAICodexAuth routes', () => {
     expect(nativeError).toMatchObject({ code: 'INVALID_CREDENTIAL' })
     expect(harness.credentials.value).not.toBe(managed.access)
     expect(await readCredential(harness.home)).toEqual(managed)
+  })
+
+  it('resolves one managed credential read across concurrent native calls', async () => {
+    harness = await createHarness()
+    const service = harness.root.openaiCodexAuth as any
+    await harness.fiber.dispose()
+    const managed: OpenAICodexCredential = {
+      access: accessToken('acct_shared'),
+      refresh: 'refresh-shared',
+      expires: Date.now() + 3_600_000,
+      accountId: 'acct_shared',
+    }
+    await writeCredential(harness.home, managed)
+    const resolveSpy = vi.spyOn(harness.credentials, 'resolve')
+
+    // The first read also migrates the legacy fixture file, so the memo can only be
+    // established by the second one.
+    await expect(service.resolveNativeCredential()).resolves.toMatchObject({ accessToken: managed.access })
+    await expect(service.resolveNativeCredential()).resolves.toMatchObject({ accessToken: managed.access })
+    const warmed = resolveSpy.mock.calls.length
+
+    // A warm memo adds no credential-service traffic at all.
+    await expect(service.resolveNativeCredential()).resolves.toMatchObject({ accessToken: managed.access })
+    expect(resolveSpy.mock.calls.length).toBe(warmed)
+
+    // One cold read establishes the cost of resolving this file from scratch.
+    await writeCredential(harness.home, { ...managed, access: accessToken('acct_cold'), accountId: 'acct_cold' })
+    const beforeSingle = resolveSpy.mock.calls.length
+    await service.resolveNativeCredential()
+    const singleCold = resolveSpy.mock.calls.length - beforeSingle
+    expect(singleCold).toBeGreaterThan(0)
+
+    // Twelve concurrent callers on a replaced file share one such resolution
+    // instead of repeating the cold read twelve times.
+    await writeCredential(harness.home, { ...managed, access: accessToken('acct_burst'), accountId: 'acct_burst' })
+    const before = resolveSpy.mock.calls.length
+    const resolved = await Promise.all(Array.from(
+      { length: 12 },
+      () => service.resolveNativeCredential() as Promise<{ accessToken: string; accountId: string }>,
+    ))
+    expect(resolved.map(entry => entry.accountId)).toEqual(Array(12).fill('acct_burst'))
+    expect(resolveSpy.mock.calls.length - before).toBeLessThanOrEqual(singleCold)
+  })
+
+  it('never serves a memoized credential inside the refresh window', async () => {
+    harness = await createHarness()
+    const service = harness.root.openaiCodexAuth as any
+    await harness.fiber.dispose()
+    const fresh: OpenAICodexCredential = {
+      access: accessToken('acct_fresh'),
+      refresh: 'refresh-fresh',
+      expires: Date.now() + 3_600_000,
+      accountId: 'acct_fresh',
+    }
+    await writeCredential(harness.home, fresh)
+    await service.resolveNativeCredential()
+    await service.resolveNativeCredential()
+    const info = await stat(join(harness.home, 'openai-codex-auth.json'))
+
+    // A memo that reaches bearerToken's pre-refresh window is a miss, not an answer.
+    service.credentialMemo = {
+      signature: `${info.ino}:${info.mtimeMs}:${info.size}`,
+      credential: {
+        ...fresh,
+        access: accessToken('acct_window'),
+        accountId: 'acct_window',
+        expires: Date.now() + 60_000,
+      },
+    }
+    await expect(service.resolveNativeCredential()).resolves.toEqual({
+      accessToken: fresh.access,
+      accountId: 'acct_fresh',
+    })
+  })
+
+  it('re-reads the managed credential after the file is replaced', async () => {
+    harness = await createHarness()
+    const service = harness.root.openaiCodexAuth as any
+    await harness.fiber.dispose()
+    const first: OpenAICodexCredential = {
+      access: accessToken('acct_first'),
+      refresh: 'refresh-first',
+      expires: Date.now() + 3_600_000,
+      accountId: 'acct_first',
+    }
+    await writeCredential(harness.home, first)
+    await expect(service.resolveNativeCredential()).resolves.toMatchObject({ accessToken: first.access })
+
+    const second: OpenAICodexCredential = {
+      access: accessToken('acct_second'),
+      refresh: 'refresh-second',
+      expires: Date.now() + 3_600_000,
+      accountId: 'acct_second',
+    }
+    await writeCredential(harness.home, second)
+    await expect(service.resolveNativeCredential()).resolves.toEqual({
+      accessToken: second.access,
+      accountId: 'acct_second',
+    })
   })
 
   it('resolves one coherent managed credential snapshot for native calls', async () => {

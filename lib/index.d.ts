@@ -132,6 +132,8 @@ export declare class OpenAICodexAuth extends Service {
     private usageAccountId;
     private responseUsage;
     private credentialAccountId;
+    private credentialMemo;
+    private credentialResolution;
     private usageError;
     private usageRefresh;
     private usageGeneration;
@@ -163,6 +165,15 @@ export declare class OpenAICodexAuth extends Service {
     private commitCredential;
     /** Return the current managed bearer token, refreshing and migrating it when needed. */
     bearerToken(signal?: AbortSignal): Promise<string | undefined>;
+    /**
+     * Resolve the managed credential for one native call, reusing a lock-free memo of
+     * the file it was read from. The model picker resolves one credential per listed
+     * model, so one shared resolution replaces a burst of lock acquisitions on the
+     * same credential file.
+     */
+    private cachedManagedCredential;
+    /** Resolve once for every concurrent caller; never memo a credential the file no longer matches. */
+    private resolveManagedCredential;
     private managedCredential;
     private externalNativeCredential;
     private resolveNativeCredential;

@@ -357,7 +357,8 @@ export class NativeCodexCatalog implements NativeCodexModelCatalog {
     } catch (error) {
       if (error instanceof LlmError && error.code === 'ABORTED') throw error
       if (!(error instanceof LlmError) || error.code !== 'MISSING_CREDENTIAL') {
-        this.options.warn?.('native Codex credential is unavailable; model metadata is advisory')
+        const code = error instanceof LlmError ? error.code : 'UNKNOWN'
+        this.options.warn?.(`native Codex credential is unavailable (${code}); model metadata is advisory`)
       }
       return { models: [] }
     }

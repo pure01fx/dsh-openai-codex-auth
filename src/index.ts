@@ -9,7 +9,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import { createHash, randomBytes } from 'node:crypto'
-import { readFile, unlink } from 'node:fs/promises'
+import { readFile, stat, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { INVALID_CREDENTIAL_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import {
@@ -410,6 +410,26 @@ async function readCredentialDocument(filename: string): Promise<ParsedCredentia
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
+}
+
+/**
+ * Cheap lock-free identity of the credential file. Every writer replaces it
+ * atomically, so both parts change and a cached read cannot outlive its file.
+ */
+async function credentialFileSignature(filename: string): Promise<string> {
+  try {
+    const info = await stat(filename)
+    // An atomic replacement renames a fresh file, so the inode changes with it.
+    return `${info.ino}:${info.mtimeMs}:${info.size}`
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing'
+    throw error
+  }
+}
+
+/** Whether a managed credential still avoids the pre-refresh window `bearerToken` enforces. */
+function managedCredentialUsable(credential: OpenAICodexCredential, now = Date.now()): boolean {
+  return credential.expires > now + TOKEN_REFRESH_PREEMPT_MS
 }
 
 function currentCredential(document: OpenAICodexCredentialDocument | undefined): OpenAICodexCredential | undefined {
@@ -886,6 +906,8 @@ export class OpenAICodexAuth extends Service {
     observedAt: number
   } | undefined
   private credentialAccountId: string | undefined
+  private credentialMemo: { signature: string; credential: OpenAICodexCredential } | undefined
+  private credentialResolution: Promise<OpenAICodexCredential | undefined> | undefined
   private usageError: string | undefined
   private usageRefresh: {
     promise: Promise<void>
@@ -1225,6 +1247,8 @@ export class OpenAICodexAuth extends Service {
   }
 
   private async commitDocument(document: OpenAICodexCredentialDocument, signal?: AbortSignal): Promise<void> {
+    // A write may publish or replace the managed account, so no read memo survives it.
+    this.credentialMemo = undefined
     const nextToken = currentCredential(document)?.access
     const previous = await this.ctx.credentials.resolve(TOKEN_REF)
     throwIfCancelled(signal)
@@ -1321,6 +1345,38 @@ export class OpenAICodexAuth extends Service {
     }
   }
 
+  /**
+   * Resolve the managed credential for one native call, reusing a lock-free memo of
+   * the file it was read from. The model picker resolves one credential per listed
+   * model, so one shared resolution replaces a burst of lock acquisitions on the
+   * same credential file.
+   */
+  private async cachedManagedCredential(signal?: AbortSignal): Promise<OpenAICodexCredential | undefined> {
+    const signature = await credentialFileSignature(this.filename)
+    const memo = this.credentialMemo
+    if (memo !== undefined && memo.signature === signature && managedCredentialUsable(memo.credential)) {
+      this.setCredentialAccount(memo.credential.accountId)
+      return memo.credential
+    }
+    const pending = this.credentialResolution ??= this.resolveManagedCredential(signature)
+    return await waitForSignal(pending, signal)
+  }
+
+  /** Resolve once for every concurrent caller; never memo a credential the file no longer matches. */
+  private resolveManagedCredential(signature: string): Promise<OpenAICodexCredential | undefined> {
+    const resolution = this.managedCredential().then(async (credential) => {
+      if (credential !== undefined && await credentialFileSignature(this.filename) === signature) {
+        this.credentialMemo = { signature, credential }
+      }
+      return credential
+    })
+    const settled = (): void => {
+      if (this.credentialResolution === resolution) this.credentialResolution = undefined
+    }
+    void resolution.then(settled, settled)
+    return resolution
+  }
+
   private async managedCredential(signal?: AbortSignal): Promise<OpenAICodexCredential | undefined> {
     while (true) {
       const access = await this.bearerToken(signal)
@@ -1356,7 +1412,7 @@ export class OpenAICodexAuth extends Service {
   private async resolveNativeCredential(signal?: AbortSignal): Promise<NativeCodexCredential> {
     try {
       throwIfCancelled(signal)
-      const managed = await this.managedCredential(signal)
+      const managed = await this.cachedManagedCredential(signal)
       if (managed !== undefined) {
         throwIfCancelled(signal)
         return { accessToken: managed.access, accountId: managed.accountId }
