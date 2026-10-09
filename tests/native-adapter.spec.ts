@@ -376,6 +376,27 @@ describe('NativeCodexAdapter catalog boundary', () => {
     ])
   })
 
+  it('retries an empty catalog instead of reporting no models', async () => {
+    const row: NativeCodexModel = {
+      slug: 'gpt-6.1-sol', displayName: 'GPT 6.1 Sol',
+      supportedReasoningLevels: [], visibility: 'list', supportedInApi: true, priority: 1,
+      additionalSpeedTiers: ['fast'], serviceTiers: [], inputModalities: ['text'],
+    }
+    const list = vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([row])
+    const adapter = new NativeCodexAdapter({ list, etag: () => undefined })
+    expect(await adapter.listModels(NATIVE_CODEX_PROVIDER)).toHaveLength(2)
+    expect(list).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a Fast alias the catalog never answered for instead of failing a model list', async () => {
+    const adapter = new NativeCodexAdapter({ list: async () => [], etag: () => undefined })
+    await expect(adapter.resolveModel(NATIVE_CODEX_PROVIDER, 'gpt-6.1-sol-fast')).resolves.toEqual({
+      provider: NATIVE_CODEX_PROVIDER,
+      id: 'gpt-6.1-sol-fast',
+      name: 'gpt-6.1-sol-fast',
+    })
+  })
+
   it.each([undefined, { list: async () => [], etag: () => undefined }])(
     'uses only exact known Lite fallbacks without catalog metadata (%s)', async catalog => {
       const seen: unknown[] = []

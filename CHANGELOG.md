@@ -7,6 +7,7 @@
 - Serves a concurrent or pool-saturated request over HTTP/SSE instead of failing the turn.
 - Moves a session to HTTP/SSE after a 400-class WebSocket rejection, so one rejected request can no longer fail every later turn in that session.
 - Logs the provider's own rejection code, status and message instead of discarding them.
+- Keeps a Fast alias resolvable when the catalog could not be read and retries one empty catalog read, so a transient catalog outage no longer fails the whole provider group in the model picker; a catalog that answers without Fast still refuses it.
 
 ## 0.13.0
 

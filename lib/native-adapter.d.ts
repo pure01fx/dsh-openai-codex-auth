@@ -44,6 +44,13 @@ export declare class NativeCodexAdapter extends LlmAdapter {
     private assertNotAborted;
     providerInfo(provider: string): LlmProviderInfo;
     providerRetryPolicy(provider: string): ResolvedRetryPolicy;
+    /**
+     * Read model metadata, retrying once when a fetch returned nothing. The catalog
+     * caches nothing on failure, so a momentary outage otherwise empties every model
+     * list it touches; metadata is advisory and one extra request is cheaper than a
+     * provider that disappears from the picker until the next attempt.
+     */
+    private catalogModels;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
     resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;

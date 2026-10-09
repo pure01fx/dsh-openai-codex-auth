@@ -250,9 +250,22 @@ export class NativeCodexAdapter extends LlmAdapter {
     return NATIVE_RETRY_POLICY
   }
 
+  /**
+   * Read model metadata, retrying once when a fetch returned nothing. The catalog
+   * caches nothing on failure, so a momentary outage otherwise empties every model
+   * list it touches; metadata is advisory and one extra request is cheaper than a
+   * provider that disappears from the picker until the next attempt.
+   */
+  private async catalogModels(signal?: AbortSignal): Promise<readonly NativeCodexModel[]> {
+    const first = await this.catalog?.list(signal) ?? []
+    if (first.length > 0) return first
+    this.assertNotAborted(signal)
+    return await this.catalog?.list(signal) ?? []
+  }
+
   async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     this.assertProvider(provider)
-    const models = await this.catalog?.list() ?? []
+    const models = await this.catalogModels()
     const aliases = fastRoutes(models)
     return models
       .filter(model => model.visibility === 'list')
@@ -273,17 +286,24 @@ export class NativeCodexAdapter extends LlmAdapter {
   ): Promise<LlmResolvedModelInfo> {
     this.assertNotAborted(signal)
     this.assertProvider(provider)
-    const models = await this.catalog?.list(signal) ?? []
+    const models = await this.catalogModels(signal)
     this.assertNotAborted(signal)
     const exact = models.find(candidate => candidate.slug === model)
     if (exact !== undefined) return resolvedModel(provider, exact)
     const fast = fastRoutes(models).get(model)
     if (fast !== undefined) return resolvedModel(provider, fast, true)
     if (model.endsWith(CODEX_FAST_ALIAS_SUFFIX)) {
-      throw new LlmError(
-        'native Codex Fast is not advertised for the selected model',
-        'FAST_UNSUPPORTED',
-      )
+      const base = model.slice(0, -CODEX_FAST_ALIAS_SUFFIX.length)
+      // Only a catalog that knows the base model can answer this negatively.
+      // Without any entry for it the metadata is missing rather than negative, and
+      // a caller that resolves every listed model (the picker) must not lose the
+      // whole provider group to an advisory fetch.
+      if (models.some(candidate => candidate.slug === base)) {
+        throw new LlmError(
+          'native Codex Fast is not advertised for the selected model',
+          'FAST_UNSUPPORTED',
+        )
+      }
     }
     return { provider, id: model, name: model }
   }
