@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-- Adds `locale/en.json` and `locale/zh.json` so the DSH 0.2.0 plugin panel shows a display name and description instead of the package id.
-
 ## 0.13.1
 
 - Serves a concurrent or pool-saturated request over HTTP/SSE instead of failing the turn.
@@ -11,6 +9,7 @@
 - Logs the provider's own rejection code, status and message instead of discarding them.
 - Keeps a Fast alias resolvable when the catalog could not be read and retries one empty catalog read, so a transient catalog outage no longer fails the whole provider group in the model picker; a catalog that answers without Fast still refuses it.
 - Memoizes the managed credential per credential-file signature with one shared resolution, so the model picker's per-model resolutions no longer take a dozen concurrent writer-lock acquisitions on the credential file (measured 2.1 s for 14 concurrent readers against a 2 s lock deadline before this change).
+- Adds `locale/en.json` and `locale/zh.json` so the DSH 0.2.0 plugin panel shows a display name and description instead of the package id.
 
 ## 0.13.0
 
