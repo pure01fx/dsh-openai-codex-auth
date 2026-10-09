@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.13.1
+
+- Serves a concurrent or pool-saturated request over HTTP/SSE instead of failing the turn.
+- Moves a session to HTTP/SSE after a 400-class WebSocket rejection, so one rejected request can no longer fail every later turn in that session.
+- Logs the provider's own rejection code, status and message instead of discarding them.
+
 ## 0.13.0
 
 - Targets DSH 0.2.0-rc.2 with exact SDK peers, development dependencies and runtime helpers; retains the tool-message, shell and provenance migration below.

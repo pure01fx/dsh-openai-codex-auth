@@ -1338,33 +1338,74 @@ describe('NativeCodexWebSocketTransport', () => {
     const iterator = transport.stream(firstRequest())[Symbol.asyncIterator]()
     const pending = iterator.next()
     await vi.waitFor(() => { expect(pendingSocket.sent).toHaveLength(1) })
-    await expect(collect(transport.stream({
+    // The pool is full, so the second session is served over HTTP/SSE instead of
+    // failing the turn, and it must not open a second socket.
+    const secondSession = await collect(transport.stream({
       ...firstRequest(),
       sessionId: 'session-second' as GenerateOptions['sessionId'],
-    }))).rejects.toMatchObject({ code: 'WS_SESSION_LIMIT' })
+    }))
+    expect(secondSession.some(chunk => chunk.type === 'finish')).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     transport.dispose()
     await expect(pending).rejects.toMatchObject({ code: 'DISPOSED' })
     expect(pendingSocket.closed).toBe(true)
     await expect(collect(transport.stream(firstRequest())))
       .rejects.toMatchObject({ code: 'DISPOSED' })
     expect(factory.options).toHaveLength(1)
+  })
+
+  it('never switches transport for a non-retryable rate failure', async () => {
+    const factory = new ScriptedFactory([new LlmError('rejected', 'RATE_LIMITED')])
+    const fetchMock = vi.fn(async () => response())
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: factory,
+      fetch: fetchMock as typeof fetch,
+    })
+    await expect(collect(transport.stream(firstRequest())))
+      .rejects.toMatchObject({ code: 'RATE_LIMITED' })
+    expect(factory.options).toHaveLength(1)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('never switches transport for non-retryable rate and request failures', async () => {
-    for (const code of ['RATE_LIMITED', 'INVALID_REQUEST']) {
-      const factory = new ScriptedFactory([new LlmError('rejected', code)])
-      const fetchMock = vi.fn(async () => response())
-      const transport = new NativeCodexWebSocketTransport({
-        resolveCredential: async () => CREDENTIAL,
-        webSocketFactory: factory,
-        fetch: fetchMock as typeof fetch,
-      })
-      await expect(collect(transport.stream(firstRequest())))
-        .rejects.toMatchObject({ code })
-      expect(factory.options).toHaveLength(1)
-      expect(fetchMock).not.toHaveBeenCalled()
-    }
+  it('keeps a rejected session on HTTP/SSE instead of failing every later turn', async () => {
+    const factory = new ScriptedFactory([new LlmError('rejected', 'INVALID_REQUEST')])
+    const fetchMock = vi.fn(async () => response())
+    const warned: string[] = []
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: factory,
+      fetch: fetchMock as typeof fetch,
+      warn: message => warned.push(message),
+    })
+    await expect(collect(transport.stream(firstRequest())))
+      .resolves.toSatisfy(chunks => chunks.some(chunk => chunk.type === 'finish'))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // The session keeps its HTTP route: the failure is not repeated on a socket.
+    await expect(collect(transport.stream(firstRequest())))
+      .resolves.toSatisfy(chunks => chunks.some(chunk => chunk.type === 'finish'))
+    expect(factory.options).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(warned).toEqual([])
+  })
+
+  it('logs the provider rejection identity without adopting it as the message', async () => {
+    const code = 'synthetic_rejection_code'
+    const factory = new ScriptedFactory([socket([JSON.stringify({
+      type: 'error', status: 400,
+      error: { code, message: 'synthetic   rejection detail' },
+    })])])
+    const warned: string[] = []
+    const transport = new NativeCodexWebSocketTransport({
+      resolveCredential: async () => CREDENTIAL,
+      webSocketFactory: factory,
+      fetch: vi.fn(async () => response()) as unknown as typeof fetch,
+      warn: message => warned.push(message),
+    })
+    await collect(transport.stream(firstRequest()))
+    expect(warned.some(line => line.includes(code) && line.includes('synthetic rejection detail')))
+      .toBe(true)
+    expect(warned.some(line => line.includes('status=400'))).toBe(true)
   })
 
   it('preserves a structured reason for a pre-aborted socket connection', async () => {

@@ -120,11 +120,18 @@ describe.each(['http','websocket'] as const)('actual target LLM/tools through lo
     expect(replay).toContainEqual(expect.objectContaining({type:'function_call_output',call_id:'call_redacted',output:'found:safe'}))
     expect(replay).toContainEqual(expect.objectContaining({type:'reasoning',encrypted_content:'encrypted_redacted'}))
   })
-  it('preserves permanent upstream failures without executing a tool or retrying',async()=>{
+  it('preserves permanent upstream failures without executing a tool',async()=>{
     const h = await harness(protocol,'error')
     expect((await h.turn([user()])).finish).toMatchObject({kind:'error',failure:{code:'INVALID_REQUEST',status:400}})
-    expect(h.requests).toHaveLength(1)
-    expect(h.protocols).toEqual([protocol])
+    // A rejected WebSocket request moves that session to HTTP/SSE for the same
+    // permanent failure instead of leaving the turn unusable.
+    if (protocol === 'websocket') {
+      expect(h.requests).toHaveLength(2)
+      expect(h.protocols).toEqual(['websocket','http'])
+    } else {
+      expect(h.requests).toHaveLength(1)
+      expect(h.protocols).toEqual(['http'])
+    }
     expect(h.executed).toEqual([])
   })
   it('cancels an actual pending connection through the target LLM service',async()=>{
