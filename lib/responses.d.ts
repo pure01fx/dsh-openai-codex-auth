@@ -54,6 +54,19 @@ export interface ResponsesUsage {
 export declare function mapResponsesUsage(usage: ResponsesUsage): TokenUsage;
 /** Classify in-band failure data without reflecting provider text. */
 export declare function responsesFailure(code?: string, message?: string, headers?: unknown): LlmError;
+export interface ProviderRejectionFacts {
+    status?: number;
+    code?: string;
+    message?: string;
+    requestId?: string;
+}
+/**
+ * One bounded operator-facing line naming the provider's own rejection, so a
+ * transport that cannot classify a refusal still records why it happened. The
+ * provider's free-form text stays in the log; it never becomes the
+ * provider-neutral error message.
+ */
+export declare function rejectionDiagnostic(transport: 'HTTP' | 'WebSocket', facts: ProviderRejectionFacts): string;
 interface ResponsesOutputItem {
     type?: string;
     id?: string;

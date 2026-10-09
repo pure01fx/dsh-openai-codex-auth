@@ -34,6 +34,7 @@ import {
 } from './rate-limits.js'
 import {
   ResponsesStreamTranslator,
+  rejectionDiagnostic,
   responsesFailure,
   codexResponseTurnState,
   type ResponsesStreamEvent,
@@ -269,21 +270,17 @@ function eventFailure(event: Record<string, unknown>): LlmError | undefined {
   return retryError('native Codex WebSocket request was rejected', 'INVALID_REQUEST', facts)
 }
 
-/**
- * One bounded log line naming the provider's own rejection, so an operator can
- * see why the socket refused a request. The provider's free-form text stays in
- * the log; it never becomes the provider-neutral error message.
- */
-function rejectionDiagnostic(event: Record<string, unknown>): string {
+/** Adapt one raw socket failure event to the shared operator-facing rejection line. */
+function socketRejectionDiagnostic(event: Record<string, unknown>): string {
   const error = typeof event.error === 'object' && event.error !== null
     ? event.error as Record<string, unknown> : event
-  const code = typeof error.code === 'string' && error.code.length > 0 ? error.code : undefined
-  const raw = typeof error.message === 'string' ? error.message : ''
-  const message = raw.replace(/\s+/g, ' ').trim().slice(0, 300)
-  const status = typeof event.status === 'number' ? ` status=${String(event.status)}` : ''
-  const detail = [code, message.length === 0 ? undefined : message]
-    .filter((part): part is string => part !== undefined).join(': ')
-  return `native Codex WebSocket rejected the request${status}${detail.length === 0 ? '' : ` (${detail})`}`
+  const requestId = eventHeader(event, 'x-request-id')
+  return rejectionDiagnostic('WebSocket', {
+    ...typeof event.status === 'number' ? { status: event.status } : {},
+    ...typeof error.code === 'string' ? { code: error.code } : {},
+    ...typeof error.message === 'string' ? { message: error.message } : {},
+    ...requestId === undefined ? {} : { requestId },
+  })
 }
 
 /** Prefer WebSocket v2; once safe retries exhaust, keep that DSH session on HTTP. */
@@ -547,7 +544,7 @@ export class NativeCodexWebSocketTransport implements NativeCodexTransport {
       )
       const wrapped = eventFailure(rawEvent)
       if (wrapped !== undefined) {
-        this.options.warn?.(rejectionDiagnostic(rawEvent))
+        this.options.warn?.(socketRejectionDiagnostic(rawEvent))
         throw wrapped
       }
       if (entry.turnState === undefined) {

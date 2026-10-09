@@ -23,6 +23,7 @@ import {
   boundedCodexTurnState,
   codexRequestBody,
   codexResponseTurnState,
+  rejectionDiagnostic,
   streamResponses,
   responsesFailure,
   type ResolvedContentPart,
@@ -323,6 +324,7 @@ function errorFacts(
 
 async function httpFailure(
   response: Response, signal: AbortSignal | undefined, telemetry: NetworkRequestHandle,
+  warn?: (message: string) => void,
 ): Promise<LlmError> {
   const facts = errorFacts(response)
   const advice = retryError('native Codex HTTP retry advice', 'SERVER', facts)
@@ -349,6 +351,15 @@ async function httpFailure(
   if (response.status >= 500) {
     return fail('native Codex server request failed', 'SERVER', facts)
   }
+  // Every classified refusal above names itself. This branch is the only place
+  // where the provider's own reason would otherwise be discarded, so record it
+  // for the operator without turning it into the provider-neutral message.
+  warn?.(rejectionDiagnostic('HTTP', {
+    status: response.status,
+    ...detail.code === undefined ? {} : { code: detail.code },
+    ...detail.message === undefined ? {} : { message: detail.message },
+    ...facts?.requestId === undefined ? {} : { requestId: String(facts.requestId) },
+  }))
   return fail('native Codex request was rejected', 'INVALID_REQUEST', facts)
 }
 
@@ -641,7 +652,7 @@ export class NativeCodexHttpTransport {
         }
       }
       if (!response.ok) {
-        let failure = await httpFailure(response, watchdog.signal, telemetry)
+        let failure = await httpFailure(response, watchdog.signal, telemetry, this.options.warn)
         if (generation.signal?.aborted || watchdog.timedOut()) {
           failure = mappedFailure(failure, watchdog, generation.signal)
         }

@@ -1021,6 +1021,43 @@ describe('NativeCodexHttpTransport', () => {
     expect(malformedFetch).toHaveBeenCalledTimes(1)
   })
 
+  it('logs the provider rejection only for an unclassified HTTP failure', async () => {
+    const warned: string[] = []
+    const unclassified = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: async () => new Response(JSON.stringify({
+        error: {
+          code: 'invalid_request_error',
+          message: 'Unrecognized request argument supplied: is_error',
+        },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json', 'x-request-id': 'req_unclassified' },
+      }),
+      maxTransientRetries: 0,
+      warn: message => warned.push(message),
+    })
+    await expect(collect(unclassified.stream(request())))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(warned).toEqual([
+      'native Codex HTTP rejected the request status=400 request_id=req_unclassified '
+      + '(invalid_request_error: Unrecognized request argument supplied: is_error)',
+    ])
+
+    // A classified refusal names itself, so the operator log stays quiet.
+    const classified = new NativeCodexHttpTransport({
+      resolveCredential: async () => CREDENTIAL,
+      fetch: async () => new Response(JSON.stringify({
+        error: { code: 'rate_limit_exceeded', message: 'synthetic slow down' },
+      }), { status: 429, headers: { 'content-type': 'application/json' } }),
+      maxTransientRetries: 0,
+      warn: message => warned.push(message),
+    })
+    await expect(collect(classified.stream(request())))
+      .rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    expect(warned).toHaveLength(1)
+  })
+
   it('cancels promptly while waiting for network recovery', async () => {
     const controller = new AbortController()
     const fetchMock = vi.fn(async () => { throw networkError() })

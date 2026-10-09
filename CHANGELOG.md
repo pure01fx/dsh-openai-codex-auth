@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.13.2
+
+- Stops putting `is_error` on a replayed `function_call_output`. The Responses wire has no such field (Codex reports a failed tool through the output text and keeps its own `success` flag internal), one Lite model answers the unknown item field with a 400 `INVALID_REQUEST`, and because the item is replayed from durable history, a single failed tool call then fails every later request in that session.
+- Logs the provider's own rejection code, message, status and request id when an HTTP/SSE failure cannot be classified into a known code, matching the existing WebSocket diagnostic, so an opaque `INVALID_REQUEST` names its cause in the operator log.
+
 ## 0.13.1
 
 - Serves a concurrent or pool-saturated request over HTTP/SSE instead of failing the turn.
