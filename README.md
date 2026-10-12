@@ -253,6 +253,32 @@ $DSH_HOME/openai-codex-auth.json
 
 `path` 的优先级高于 `dshHome`。
 
+### 关闭或恢复计量服务替代
+
+计量服务的选择由组合节点控制，目前不是 `openai-codex-auth` 的 `config` 开关。要保留 Codex Provider、OAuth 和 UI 功能，同时恢复 DSH 默认计量器，将以下覆盖项放到 profile 最后应用的补丁中（在本包补丁之后）：
+
+```yaml
+- id: token-meter
+  disabled: false
+
+- id: codex-token-meter
+  disabled: true
+```
+
+两项必须同时设置，确保只有一个 `ctx.tokenMeter`；关闭替代后，本包的隐藏推理保留预算修正及 UI 预计占用修正都会停用。`nativeAdapter: false` 只切换 Provider 行为，不会恢复 base 的计量节点。自定义 profile 如果使用不同节点 ID，应替换上面的 ID。
+
+保存覆盖配置后重新启动该 profile，使服务选择在启动时生效，避免在线切换过程中出现两个计量服务同时挂载。
+
+要重新启用本包计量器，反向覆盖这两项并重新启动 profile：
+
+```yaml
+- id: token-meter
+  disabled: true
+
+- id: codex-token-meter
+  disabled: false
+```
+
 ### 原生 Codex transport 与组合边界
 
 本包跟踪的上游 Codex repository、commit、release 与 Catalog client version 只在 `src/upstream.ts` 维护；升级上游时先更新该文件，再刷新 fixtures、生成产物和兼容测试，避免多个散落 hash 漂移。
