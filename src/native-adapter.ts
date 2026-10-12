@@ -25,6 +25,33 @@ export const NATIVE_CODEX_PROVIDER = 'openai-codex-native'
 const OWNED_CODEX_PROVIDERS = new Set([CODEX_PROVIDER, NATIVE_CODEX_PROVIDER])
 const replayOwners = new WeakMap<object, Map<string, NativeCodexAdapter>>()
 
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * Native replay ownership changed.
+     * @mode emit
+     */
+    'codex/replay-owners-updated'(): void
+  }
+}
+
+/**
+ * Snapshot immutable provider groups for a pure projection's replay policy.
+ * @param runtime - current LLM service, or undefined before it is available.
+ * @returns sorted groups; each group is owned by one native adapter instance.
+ */
+export function nativeCodexReplayGroups(runtime: LlmRuntime | undefined): readonly (readonly string[])[] {
+  if (runtime === undefined) return Object.freeze([])
+  const groups = new Map<NativeCodexAdapter, string[]>()
+  for (const [provider, adapter] of replayOwners.get(runtimeKey(runtime)) ?? []) {
+    const group = groups.get(adapter) ?? []
+    group.push(provider)
+    groups.set(adapter, group)
+  }
+  return Object.freeze([...groups.values()].map(group => Object.freeze(group.sort()))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))))
+}
+
 // Cordis returns scope-traced views; use the original service for ownership identity.
 function runtimeKey(runtime: LlmRuntime): object {
   return Reflect.get(runtime, symbols.original) ?? runtime
@@ -48,10 +75,12 @@ export function registerNativeCodexAdapter(
     let owners = replayOwners.get(runtimeKey(runtime))
     if (owners === undefined) replayOwners.set(runtimeKey(runtime), owners = new Map())
     for (const provider of providers) owners.set(provider, adapter)
+    ctx.emit('codex/replay-owners-updated')
     return () => {
       for (const provider of providers) {
         if (owners.get(provider) === adapter) owners.delete(provider)
       }
+      ctx.emit('codex/replay-owners-updated')
     }
   })
 }

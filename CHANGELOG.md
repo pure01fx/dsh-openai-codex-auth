@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.13.4
+
+- Extends the replacement meter to supply the UI context-pressure projection. Estimated occupancy includes native encrypted replay while measured input remains unchanged; per-session request routes, model-window matching, and compatible sample selection isolate conversations and model switches. Projection checkpoints recompute policy-dependent views on restore, and ownership changes rebuild the single pressure registration.
+
 ## 0.13.3
 
 - Supplies a replacement token-meter service through the package composition patch, so Codex encrypted reasoning participates in retained-history pricing and pressure reductions after compaction without changing Harness source. Reuses ordinary host pricing, preserves fixed heuristic projections, and corrects usage anchors without double-counting reasoning output. Preserves an explicitly reported zero reasoning count so it does not trigger the missing-detail fallback.

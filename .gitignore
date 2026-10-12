@@ -33,6 +33,8 @@ lib/*
 !lib/replay.d.ts
 !lib/token-meter.js
 !lib/token-meter.d.ts
+!lib/pressure-projection.js
+!lib/pressure-projection.d.ts
 !lib/retry-after.js
 !lib/retry-after.d.ts
 !lib/network-telemetry.js

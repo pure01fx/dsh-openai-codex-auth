@@ -1,6 +1,8 @@
 /** Codex hidden-replay pricing layered over the host's ordinary token meter. */
 import { TokenMeter } from '@deepseek-ai/dsh-token-meter'
-import type { TokenMeasurement, TokenMeasurementBaseline } from '@deepseek-ai/dsh-token-meter'
+import type { TokenMeasurement, TokenMeasurementBaseline, TokenMeterConfig } from '@deepseek-ai/dsh-token-meter'
+import type { Context } from '@deepseek-ai/cordis'
+import { capturePressureRegistration, codexPressureProjection } from './pressure-projection.js'
 import { estimateToolsTokens } from '@deepseek-ai/dsh-token-meter/estimate'
 import { assembleAssistantStream } from '@deepseek-ai/dsh-llm'
 import type { AssistantProviderMetadata, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
@@ -8,7 +10,7 @@ import {
   canonicalHeader, deriveEventMessage, headerEquals, isSurfaceEvent, SessionSeq,
 } from '@deepseek-ai/dsh-session'
 import type { EpochHeader, Session, SessionEvent, SessionSeq as Seq } from '@deepseek-ai/dsh-session'
-import { canReplayNativeCodex } from './native-adapter.js'
+import { canReplayNativeCodex, nativeCodexReplayGroups } from './native-adapter.js'
 import { estimateNativeCodexReplayTokens } from './replay.js'
 
 interface ReplayPrice {
@@ -46,12 +48,32 @@ function sameHeader(a: EpochHeader | undefined, b: EpochHeader | undefined): boo
 
 /**
  * Replacement tokenMeter service that charges native Codex encrypted reasoning.
- * Ordinary prices and projections come from the host meter. Hidden prices apply
+ * Ordinary prices, usage, and breakdown projections come from the host meter.
+ * The UI pressure unit adds the same hidden pricing per logged request route. Hidden prices apply
  * only between routes currently owned by the same native adapter; fixed
  * heuristicTokens stay unchanged. Provider usage is not charged a second time.
  */
 export class CodexTokenMeter extends TokenMeter {
+  static override inject = ['sessionProjections', 'llm']
   private readonly hiddenFolds = new WeakMap<Session, HiddenFold>()
+
+  constructor(ctx: Context, config?: TokenMeterConfig) {
+    const capture = capturePressureRegistration(ctx)
+    super(capture.context, config)
+    let unregister: (() => void) | undefined
+    let policy: string | undefined
+    const refresh = () => {
+      const groups = nativeCodexReplayGroups(ctx.get('llm'))
+      const fingerprint = JSON.stringify(groups)
+      if (fingerprint === policy) return
+      unregister?.()
+      unregister = capture.register(codexPressureProjection(capture.definition, groups))
+      policy = fingerprint
+    }
+    refresh()
+    ctx.on('codex/replay-owners-updated', refresh)
+    ctx.effect(() => () => { unregister?.() })
+  }
 
   /**
    * Return a detached measurement including opaque native replay in node prices,

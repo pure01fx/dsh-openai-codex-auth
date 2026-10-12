@@ -86,12 +86,16 @@ describe('published token-meter composition', () => {
       expect(measurement.nodes.find(node => node.seq === assistant.seq)!.tokens).toBeGreaterThan(1000)
       expect(measurement.totalTokens).toBe(1201)
       expect(measurement.surfaceDeltaTokens).toBe(0)
-      expect(ctx.sessionProjections.snapshot(session).values).toHaveProperty('contextPressure')
+      expect(ctx.sessionProjections.snapshot(session).values.contextPressure).toEqual({ pressureTokens: 200, projectedTokens: 1210 })
+      expect(ctx.sessionProjections.checkpoint(session).contextPressure!.ver).toBe(6)
       const frozen = measurement
       await ctx.loader.root.stop()
       await ctx.loader.await()
       expect(ctx.get('tokenMeter')).toBeUndefined()
       expect(ctx.get('openaiCodexAuth')).toBeUndefined()
+      expect(ctx.sessionProjections.snapshot(session).values).not.toHaveProperty('contextPressure')
+      expect(ctx.sessionProjections.snapshot(session).values).not.toHaveProperty('tokenUsage')
+      expect(ctx.sessionProjections.snapshot(session).values).not.toHaveProperty('contextBreakdown')
       expect(routes.size).toBe(0)
       expect(frozen.totalTokens).toBe(1201)
     } finally {

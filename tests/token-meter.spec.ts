@@ -242,10 +242,17 @@ describe('native Codex token meter', () => {
     const compactor = new Compactor(ctx, { thresholdRatio: 0.8, headroomTokens: 0, maxTokens: 100, retainTokens: 2500 })
     const agent = { session, options: { provider: CODEX_PROVIDER, model: MODEL } } as Agent
     expect(meter.measure(session).totalTokens).toBe(4201)
+    const uiBefore = ctx.sessionProjections.snapshot(session).values.contextPressure!
+    expect(uiBefore.projectedTokens).toBe(4210)
     const result = await compactor.compactIfNeeded(agent, 'pressure', new AbortController().signal)
     expect(result).not.toBeNull()
     expect(compactor.calls).toBe(1)
-    expect(meter.measure(session).totalTokens).toBeLessThan(4000)
+    const measuredAfter = meter.measure(session)
+    expect(measuredAfter.totalTokens).toBeLessThan(4000)
+    const uiAfter = ctx.sessionProjections.snapshot(session).values.contextPressure!
+    expect(uiAfter.pressureTokens).toBe(uiBefore.pressureTokens)
+    expect(uiAfter.projectedTokens).toBeLessThan(4000)
+    expect(uiAfter.projectedTokens! - uiBefore.projectedTokens!).toBe(measuredAfter.totalTokens - 4201)
     expect(await compactor.compactIfNeeded(agent, 'pressure', new AbortController().signal)).toBeNull()
     expect(compactor.calls).toBe(1)
   })

@@ -36,6 +36,7 @@ describe('generated package artifacts', () => {
       'lib/upstream.js', 'lib/upstream.d.ts',
       'lib/usage.js', 'lib/usage.d.ts',
       'lib/token-meter.js', 'lib/token-meter.d.ts',
+      'lib/pressure-projection.js', 'lib/pressure-projection.d.ts',
     ]))
     expect(OpenAICodexAuth).toBeTypeOf('function')
     expect(CodexTokenMeter).toBeTypeOf('function')
@@ -126,7 +127,7 @@ describe('generated package artifacts', () => {
         'cloud-http', 'cloud-search', 'cloud-context', 'cloud-web-tool',
         'cloud-images', 'cloud-media', 'cloud-vision', 'cloud-tools',
         'native-websocket', 'native-websocket-session', 'native-websocket-socket',
-        'rate-limits', 'retry-after', 'replay', 'response-usage', 'responses', 'sse', 'upstream', 'usage', 'token-meter',
+        'rate-limits', 'retry-after', 'replay', 'response-usage', 'responses', 'sse', 'upstream', 'usage', 'token-meter', 'pressure-projection',
       ]
       for (const module of modules) {
         for (const extension of ['js', 'd.ts']) {

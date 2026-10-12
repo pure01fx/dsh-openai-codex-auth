@@ -6,6 +6,21 @@ import type { NativeCodexModel, NativeCodexModelCatalog } from './catalog.js';
 export declare const CODEX_PROVIDER = "openai-codex";
 /** Compatibility route retained for sessions created during the native preview. */
 export declare const NATIVE_CODEX_PROVIDER = "openai-codex-native";
+declare module '@deepseek-ai/cordis' {
+    interface Events {
+        /**
+         * Native replay ownership changed.
+         * @mode emit
+         */
+        'codex/replay-owners-updated'(): void;
+    }
+}
+/**
+ * Snapshot immutable provider groups for a pure projection's replay policy.
+ * @param runtime - current LLM service, or undefined before it is available.
+ * @returns sorted groups; each group is owned by one native adapter instance.
+ */
+export declare function nativeCodexReplayGroups(runtime: LlmRuntime | undefined): readonly (readonly string[])[];
 /**
  * Register native routes and their replay-pricing ownership in the same Cordis scope.
  * @param ctx - scope owning the native adapter registration.
