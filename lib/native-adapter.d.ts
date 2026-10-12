@@ -1,10 +1,26 @@
 /** Native Codex adapter with live catalog and HTTP/WebSocket transport delegation. */
-import { LlmAdapter, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type ResolvedRetryPolicy, type StreamChunk } from '@deepseek-ai/dsh-llm';
+import { LlmAdapter, type GenerateOptions, type LlmModelInfo, type LlmRuntime, type LlmProviderInfo, type LlmResolvedModelInfo, type ResolvedRetryPolicy, type StreamChunk } from '@deepseek-ai/dsh-llm';
+import { type Context } from '@deepseek-ai/cordis';
 import type { NativeCodexModel, NativeCodexModelCatalog } from './catalog.js';
 /** Production provider route owned by the package native Codex adapter after M6 cutover. */
 export declare const CODEX_PROVIDER = "openai-codex";
 /** Compatibility route retained for sessions created during the native preview. */
 export declare const NATIVE_CODEX_PROVIDER = "openai-codex-native";
+/**
+ * Register native routes and their replay-pricing ownership in the same Cordis scope.
+ * @param ctx - scope owning the native adapter registration.
+ * @param providers - canonical and optional compatibility routes for this instance.
+ * @param adapter - native adapter that will replay its own continuation state.
+ */
+export declare function registerNativeCodexAdapter(ctx: Context, providers: string[], adapter: NativeCodexAdapter): void;
+/**
+ * Match the runtime's same-adapter ownership rule for native continuation replay.
+ * @param runtime - current global LLM service instance.
+ * @param sourceProvider - provider that produced the historical assistant message.
+ * @param targetProvider - provider preparing the measured request.
+ * @returns whether both routes are currently owned by the same native adapter.
+ */
+export declare function canReplayNativeCodex(runtime: LlmRuntime, sourceProvider: string, targetProvider: string): boolean;
 export declare const CODEX_FAST_ALIAS_SUFFIX = "-fast";
 export declare const CODEX_FAST_SERVICE_TIER = "priority";
 /** Pure network establishment failure; retried without consuming the finite stream budget. */

@@ -5,12 +5,14 @@ import {
   ReasoningEffortId,
   type GenerateOptions,
   type LlmModelInfo,
+  type LlmRuntime,
   type LlmProviderInfo,
   type LlmResolvedModelInfo,
   type ModelModality,
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { symbols, type Context } from '@deepseek-ai/cordis'
 import type {
   NativeCodexModel,
   NativeCodexModelCatalog,
@@ -21,6 +23,55 @@ export const CODEX_PROVIDER = 'openai-codex'
 /** Compatibility route retained for sessions created during the native preview. */
 export const NATIVE_CODEX_PROVIDER = 'openai-codex-native'
 const OWNED_CODEX_PROVIDERS = new Set([CODEX_PROVIDER, NATIVE_CODEX_PROVIDER])
+const replayOwners = new WeakMap<object, Map<string, NativeCodexAdapter>>()
+
+// Cordis returns scope-traced views; use the original service for ownership identity.
+function runtimeKey(runtime: LlmRuntime): object {
+  return Reflect.get(runtime, symbols.original) ?? runtime
+}
+
+/**
+ * Register native routes and their replay-pricing ownership in the same Cordis scope.
+ * @param ctx - scope owning the native adapter registration.
+ * @param providers - canonical and optional compatibility routes for this instance.
+ * @param adapter - native adapter that will replay its own continuation state.
+ */
+export function registerNativeCodexAdapter(
+  ctx: Context,
+  providers: string[],
+  adapter: NativeCodexAdapter,
+): void {
+  const runtime = ctx.get('llm')
+  if (runtime === undefined) throw new Error('native Codex registration requires llm')
+  ctx.llm.registerAdapter(providers, adapter)
+  ctx.effect(() => {
+    let owners = replayOwners.get(runtimeKey(runtime))
+    if (owners === undefined) replayOwners.set(runtimeKey(runtime), owners = new Map())
+    for (const provider of providers) owners.set(provider, adapter)
+    return () => {
+      for (const provider of providers) {
+        if (owners.get(provider) === adapter) owners.delete(provider)
+      }
+    }
+  })
+}
+
+/**
+ * Match the runtime's same-adapter ownership rule for native continuation replay.
+ * @param runtime - current global LLM service instance.
+ * @param sourceProvider - provider that produced the historical assistant message.
+ * @param targetProvider - provider preparing the measured request.
+ * @returns whether both routes are currently owned by the same native adapter.
+ */
+export function canReplayNativeCodex(
+  runtime: LlmRuntime,
+  sourceProvider: string,
+  targetProvider: string,
+): boolean {
+  const owners = replayOwners.get(runtimeKey(runtime))
+  const adapter = owners?.get(targetProvider)
+  return adapter !== undefined && owners?.get(sourceProvider) === adapter
+}
 export const CODEX_FAST_ALIAS_SUFFIX = '-fast'
 export const CODEX_FAST_SERVICE_TIER = 'priority'
 /** Pure network establishment failure; retried without consuming the finite stream budget. */

@@ -16,6 +16,7 @@ import {
   CODEX_PROVIDER,
   NATIVE_CODEX_PROVIDER,
   NativeCodexAdapter,
+  registerNativeCodexAdapter,
 } from './native-adapter.js'
 export { CODEX_PROVIDER, NATIVE_CODEX_PROVIDER } from './native-adapter.js'
 import { NativeCodexCatalog, type NativeCodexCredential } from './catalog.js'
@@ -969,7 +970,8 @@ export class OpenAICodexAuth extends Service {
         ctx.effect(() => () => { transport.dispose() }, 'openai-codex-auth: dispose native WebSockets')
       }
       ctx.inject(['llm'], (llmCtx) => {
-        llmCtx.llm.registerAdapter(
+        registerNativeCodexAdapter(
+          llmCtx,
           [
             CODEX_PROVIDER,
             ...(this.routeConfig.nativeCompatibilityRoute ? [NATIVE_CODEX_PROVIDER] : []),

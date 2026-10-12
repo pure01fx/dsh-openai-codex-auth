@@ -31,6 +31,8 @@ lib/*
 !lib/responses.d.ts
 !lib/replay.js
 !lib/replay.d.ts
+!lib/token-meter.js
+!lib/token-meter.d.ts
 !lib/retry-after.js
 !lib/retry-after.d.ts
 !lib/network-telemetry.js

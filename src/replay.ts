@@ -1,5 +1,5 @@
 /** Versioned Codex Responses continuation state. */
-import { LlmError, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { LlmError, type AssistantProviderMetadata, type ContentBlock, type TokenUsage } from '@deepseek-ai/dsh-llm'
 
 export const NATIVE_CODEX_REPLAY_KIND = 'openai-codex-native.responses-replay'
 export const NATIVE_CODEX_REPLAY_VERSION = 1
@@ -152,6 +152,32 @@ function parseState(value: unknown): NativeCodexReplayState {
     model,
     items,
   }
+}
+
+/**
+ * Estimate hidden reasoning only when the native continuation replays encrypted items.
+ * A response's reasoning usage is charged once, not once per reasoning item.
+ * Without reasoning details, output usage bounds the generated reasoning; without
+ * usage, decoded ciphertext bytes are a size heuristic, not exact token billing.
+ * @param source - original provider/model and native continuation state.
+ * @param usage - original response usage, when available in the durable event.
+ * @returns additional hidden replay tokens; zero for non-native or unencrypted state.
+ */
+export function estimateNativeCodexReplayTokens(
+  source: AssistantProviderMetadata,
+  usage?: TokenUsage,
+): number {
+  if (!hasNativeCodexReplayKind(source.replayState)) return 0
+  const state = parseState(source.replayState)
+  if (state.provider !== source.provider || state.model !== source.model) {
+    throw failure('native Codex replay identity does not match its assistant message')
+  }
+  const encrypted = state.items.flatMap(item =>
+    item.type === 'reasoning' && item.encryptedContent !== undefined ? [item.encryptedContent] : [],
+  )
+  if (encrypted.length === 0) return 0
+  if (usage !== undefined) return usage.reasoningTokens ?? usage.outputTokens
+  return encrypted.reduce((total, content) => total + Buffer.byteLength(content, 'base64'), 0)
 }
 
 /** Attempt-local accumulator for completed replay descriptors. */

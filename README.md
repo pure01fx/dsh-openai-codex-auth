@@ -259,7 +259,11 @@ $DSH_HOME/openai-codex-auth.json
 
 从 0.6 开始，Native Adapter 是插件默认 Provider，并持有生产 route `openai-codex`。旧预览会话确实需要时，可显式设置 `nativeCompatibilityRoute: true`，让同一个 adapter 同时注册 `openai-codex-native` 兼容 route；启用兼容 route 时两者仍原子注册，任一 route 已被占用都会整体失败。默认只暴露生产 route。
 
-本包只定义 Codex Provider，不发布或改写任何具体 Profile。整合包必须在挂载本插件前释放已有的 `openai-codex` route，例如从自己的 `llm-pi-ai` provider map 中移除该项；本包不会清空未知的 sibling providers。只想复用 OAuth/UI 并继续使用外部 Provider 的组合可以显式设置 `nativeAdapter: false`。从 pi-ai 切到 Native 时，旧 foreign replay 会降级为可见持久历史；反向切回 pi-ai 后，已产生 Native replay 的进行中 session 不保证可续跑，应新建 session。
+本包提供 Codex Provider 和计量服务替代入口，不发布具体 Profile。整合包必须在挂载本插件前释放已有的 `openai-codex` route，例如从自己的 `llm-pi-ai` provider map 中移除该项；本包不会清空未知的 sibling providers。只想复用 OAuth/UI 并继续使用外部 Provider 的组合可以显式设置 `nativeAdapter: false`。从 pi-ai 切到 Native 时，旧 foreign replay 会降级为可见持久历史；反向切回 pi-ai 后，已产生 Native replay 的进行中 session 不保证可续跑，应新建 session。
+
+`cordis.patch.yml` 会禁用 base bundle 的 `token-meter` 节点，并挂载本包 `/token-meter` 入口作为唯一的 `ctx.tokenMeter`；无需修改 DSH 源码。自定义组合应禁用自己的默认计量服务，再挂载同一入口，不能同时运行两个计量服务。服务复用宿主的文本、图片、文件和投影实现，只对源 route 与目标 route 属于同一个活跃 Native Codex adapter 的历史补充加密推理价格；`nativeAdapter: false` 和其他模型沿用宿主价格。
+
+加密推理计量优先使用原始响应的 `usage.reasoningTokens`，每次响应计一次；缺少推理细分时以 `outputTokens` 作为生成推理的保守上界，连用量也没有时才用解码密文的字节数作体积估算。这些都是重放占用估计，不是精确的服务端输入计费。计量会同时修正节点 `tokens`、`surfaceTokens`、完整锚点与有符号的 `surfaceDeltaTokens`，服务端已计入的推理不会再加一次，压缩移除历史时会扣减隐藏占用；`heuristicTokens`、持久消息和服务端用量保持原语义。宿主 UI 的固定启发式投影仍由原实现提供，不包含本包的隐藏推理估计。
 
 上游 Native Codex Responses 请求没有输出 token 上限字段，因此普通会话若显式设置 `maxTokens` 仍会在 Provider I/O 前失败。DSH 的压缩与会话标题辅助调用会固定携带 `maxTokens`，并分别通过 `purpose: compaction` 与 `purpose: session-title` 标识；本适配器允许这两类 hint 通过，但不会把它序列化为 `max_output_tokens`，实际输出长度仍由 Native Codex 决定。
 

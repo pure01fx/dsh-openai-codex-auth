@@ -1,5 +1,10 @@
 # Native Codex is the package default. Integration bundles own any removal or
 # replacement of an existing openai-codex route before mounting this plugin.
+# Replace the service provider without renaming the base token-meter row.
+- id: token-meter
+  disabled: true
 - insert:
     - id: openai-codex-auth
       name: '@pure01fx/dsh-openai-codex-auth'
+    - id: codex-token-meter
+      name: '@pure01fx/dsh-openai-codex-auth/token-meter'

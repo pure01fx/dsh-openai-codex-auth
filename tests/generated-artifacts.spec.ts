@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import OpenAICodexAuth from '../lib/index.js'
+import CodexTokenMeter from '@pure01fx/dsh-openai-codex-auth/token-meter'
 import { NativeCodexCatalog } from '../lib/catalog.js'
 import { NativeCodexHttpTransport } from '../lib/native-http.js'
 import { NativeCodexWebSocketTransport } from '../lib/native-websocket.js'
@@ -34,8 +35,10 @@ describe('generated package artifacts', () => {
       'lib/response-usage.js', 'lib/response-usage.d.ts',
       'lib/upstream.js', 'lib/upstream.d.ts',
       'lib/usage.js', 'lib/usage.d.ts',
+      'lib/token-meter.js', 'lib/token-meter.d.ts',
     ]))
     expect(OpenAICodexAuth).toBeTypeOf('function')
+    expect(CodexTokenMeter).toBeTypeOf('function')
     expect(NativeCodexCatalog).toBeTypeOf('function')
     expect(NativeCodexHttpTransport).toBeTypeOf('function')
     expect(NativeCodexWebSocketTransport).toBeTypeOf('function')
@@ -123,7 +126,7 @@ describe('generated package artifacts', () => {
         'cloud-http', 'cloud-search', 'cloud-context', 'cloud-web-tool',
         'cloud-images', 'cloud-media', 'cloud-vision', 'cloud-tools',
         'native-websocket', 'native-websocket-session', 'native-websocket-socket',
-        'rate-limits', 'retry-after', 'replay', 'response-usage', 'responses', 'sse', 'upstream', 'usage',
+        'rate-limits', 'retry-after', 'replay', 'response-usage', 'responses', 'sse', 'upstream', 'usage', 'token-meter',
       ]
       for (const module of modules) {
         for (const extension of ['js', 'd.ts']) {

@@ -1,5 +1,5 @@
 /** Versioned Codex Responses continuation state. */
-import { type ContentBlock } from '@deepseek-ai/dsh-llm';
+import { type AssistantProviderMetadata, type ContentBlock, type TokenUsage } from '@deepseek-ai/dsh-llm';
 export declare const NATIVE_CODEX_REPLAY_KIND = "openai-codex-native.responses-replay";
 export declare const NATIVE_CODEX_REPLAY_VERSION = 1;
 export type CodexMessagePhase = 'commentary' | 'partial_answer' | 'final_answer';
@@ -36,6 +36,16 @@ export interface NativeCodexReplaySource {
 export declare function replayableItemId(value: string | undefined): string | undefined;
 /** True only for legacy raw state or an rc.2 envelope emitted by this package. */
 export declare function hasNativeCodexReplayKind(value: unknown): boolean;
+/**
+ * Estimate hidden reasoning only when the native continuation replays encrypted items.
+ * A response's reasoning usage is charged once, not once per reasoning item.
+ * Without reasoning details, output usage bounds the generated reasoning; without
+ * usage, decoded ciphertext bytes are a size heuristic, not exact token billing.
+ * @param source - original provider/model and native continuation state.
+ * @param usage - original response usage, when available in the durable event.
+ * @returns additional hidden replay tokens; zero for non-native or unencrypted state.
+ */
+export declare function estimateNativeCodexReplayTokens(source: AssistantProviderMetadata, usage?: TokenUsage): number;
 /** Attempt-local accumulator for completed replay descriptors. */
 export declare class NativeCodexReplayCapture {
     private readonly provider;

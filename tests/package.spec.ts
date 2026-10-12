@@ -22,9 +22,14 @@ describe('package integration boundary', () => {
     expect(await text('../cordis.patch.yml')).toBe(
       '# Native Codex is the package default. Integration bundles own any removal or\n'
       + '# replacement of an existing openai-codex route before mounting this plugin.\n'
+      + '# Replace the service provider without renaming the base token-meter row.\n'
+      + '- id: token-meter\n'
+      + '  disabled: true\n'
       + '- insert:\n'
       + '    - id: openai-codex-auth\n'
-      + "      name: '@pure01fx/dsh-openai-codex-auth'\n",
+      + "      name: '@pure01fx/dsh-openai-codex-auth'\n"
+      + "    - id: codex-token-meter\n"
+      + "      name: '@pure01fx/dsh-openai-codex-auth/token-meter'\n",
     )
   })
 })

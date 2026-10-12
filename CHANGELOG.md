@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.13.3
+
+- Supplies a replacement token-meter service through the package composition patch, so Codex encrypted reasoning participates in retained-history pricing and pressure reductions after compaction without changing Harness source. Reuses ordinary host pricing, preserves fixed heuristic projections, and corrects usage anchors without double-counting reasoning output. Preserves an explicitly reported zero reasoning count so it does not trigger the missing-detail fallback.
+
 ## 0.13.2
 
 - Stops putting `is_error` on a replayed `function_call_output`. The Responses wire has no such field (Codex reports a failed tool through the output text and keeps its own `success` flag internal), one Lite model answers the unknown item field with a 400 `INVALID_REQUEST`, and because the item is replayed from durable history, a single failed tool call then fails every later request in that session.

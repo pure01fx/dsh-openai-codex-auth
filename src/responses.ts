@@ -342,7 +342,7 @@ export function mapResponsesUsage(usage: ResponsesUsage): TokenUsage {
     inputTokens: uncached, outputTokens: output,
     ...cached === 0 ? {} : { cacheReadTokens: cached },
     ...written === 0 ? {} : { cacheWriteTokens: written },
-    ...reasoning === 0 ? {} : { reasoningTokens: reasoning },
+    ...usage.output_tokens_details?.reasoning_tokens === undefined ? {} : { reasoningTokens: reasoning },
   }
 }
 
